@@ -63,49 +63,50 @@ type Coordinator struct {
 //用于worker调用这个函数，用来获取对应的处理文件
 func (c *Coordinator) Gettask(args *Args, reply *Reply) error {
 	// fmt.Println(c.files[0])
-	c.m.Lock()
-	if !c.map_finished && len(c.input_index) > 0 {
-		reply.Type = "map"
-		reply.Index = c.input_index[0]
-		reply.File = c.input_index_to_files[c.input_index[0]]
+	for {
+		c.m.Lock()
+		if !c.map_finished && len(c.input_index) > 0 {
+			reply.Type = "map"
+			reply.Index = c.input_index[0]
+			reply.File = c.input_index_to_files[c.input_index[0]]
 
-		//每次获取文件都要重设对应的编号的计时器
-		if !c.map_timers[c.input_index[0]].Stop() {
-			select {
-			case <-c.map_timers[c.input_index[0]].C:
-			default:
+			//每次获取文件都要重设对应的编号的计时器
+			if !c.map_timers[c.input_index[0]].Stop() {
+				select {
+				case <-c.map_timers[c.input_index[0]].C:
+				default:
+				}
 			}
-		}
-		c.map_timers[c.input_index[0]].Reset(10 * time.Second)
+			c.map_timers[c.input_index[0]].Reset(10 * time.Second)
 
-		reply.NReduce = c.nReduce
-		c.input_index = c.input_index[1:]
+			reply.NReduce = c.nReduce
+			c.input_index = c.input_index[1:]
 
-	} else if c.map_finished && !c.reduce_finished && len(c.reduce_index) > 0 {
-		reply.Type = "reduce"
-		reply.Index = c.reduce_index[0]
-		reply.Intermediatefiles = c.reduce_index_to_files[c.reduce_index[0]]
+			c.m.Unlock()
 
-		if !c.reduce_timers[c.reduce_index[0]].Stop() {
-			select {
-			case <-c.reduce_timers[c.reduce_index[0]].C:
-			default:
+			break
+
+		} else if c.map_finished && !c.reduce_finished && len(c.reduce_index) > 0 {
+			reply.Type = "reduce"
+			reply.Index = c.reduce_index[0]
+			reply.Intermediatefiles = c.reduce_index_to_files[c.reduce_index[0]]
+
+			if !c.reduce_timers[c.reduce_index[0]].Stop() {
+				select {
+				case <-c.reduce_timers[c.reduce_index[0]].C:
+				default:
+				}
 			}
+			c.reduce_timers[c.reduce_index[0]].Reset(10 * time.Second)
+
+			c.reduce_index = c.reduce_index[1:]
+
+			c.m.Unlock()
+
+			break
 		}
-		c.reduce_timers[c.reduce_index[0]].Reset(10 * time.Second)
-
-		c.reduce_index = c.reduce_index[1:]
-
-		//由于是多线程，可能会出现map对应的任务全部分配完，但还没有得到处理完，此时再有进程过来访问的情况
-		//此时属于过渡阶段
-	} else if !c.map_finished {
-		reply.Type = "map_dealing"
-	} else if c.map_finished && !c.reduce_finished {
-		reply.Type = "reduce_dealing"
-	} else {
-		reply.Type = "job_finished"
+		c.m.Unlock()
 	}
-	c.m.Unlock()
 
 	// fmt.Println(reply.File, reply.NReduce)
 	return nil

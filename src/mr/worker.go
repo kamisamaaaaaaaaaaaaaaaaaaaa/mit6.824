@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io/ioutil"
+	"log"
 	"net/rpc"
 	"os"
 	"sort"
@@ -80,6 +81,26 @@ func CallExample() {
 	}
 }
 
+func make_response(is_succeed bool, Type string, index int) {
+	args := Args{}
+	args.Type = Type
+
+	if Type == "map" {
+		args.Map_finished = is_succeed
+		args.Map_index = index
+	} else {
+		args.Reduce_finished = is_succeed
+		args.Reduce_index = index
+	}
+
+	reply := Reply{}
+
+	ok := call("Coordinator.Response", &args, &reply)
+	if !ok {
+		fmt.Printf("response failed for map index %d\n", index)
+	}
+}
+
 //worker调用该函数向master获取任务
 func Call(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
@@ -93,29 +114,26 @@ func Call(mapf func(string, string) []KeyValue,
 	if ok {
 
 		task_type := reply.Type
+		index := reply.Index
 
-		if task_type == "map_dealing" {
-			// fmt.Printf("map task is dealing\n")
-		} else if task_type == "reduce_dealing" {
-			// fmt.Printf("reduce task is dealing\n")
-		} else if task_type == "job_finished" {
-			// fmt.Printf("job has finished\n")
-		} else if task_type == "map" {
+		if task_type == "map" {
 			//map任务
 			n_reduce := reply.NReduce
-			index := reply.Index
+
 			input_file_name := reply.File
 
 			input_file, err := os.Open(input_file_name)
 
 			if err != nil {
-				// log.Fatalf("cannot open %v", input_file_name)
+				log.Fatalf("cannot open %v", input_file_name)
+				make_response(false, "map", index)
 			}
 
 			content, err := ioutil.ReadAll(input_file)
 
 			if err != nil {
-				// log.Fatalf("cannot read %v", input_file_name)
+				log.Fatalf("cannot read %v", input_file_name)
+				make_response(false, "map", index)
 			}
 
 			input_file.Close()
@@ -130,7 +148,8 @@ func Call(mapf func(string, string) []KeyValue,
 				intermidiate_file_name := "mr-" + strconv.Itoa(index) + "-" + strconv.Itoa(i)
 				intermidiate_file, err := os.Create(intermidiate_file_name)
 				if err != nil {
-					// log.Fatalf("Create %v Fail!\n", intermidiate_file_name)
+					log.Fatalf("Create %v Fail!\n", intermidiate_file_name)
+					make_response(false, "map", index)
 				}
 				defer intermidiate_file.Close()
 				intermidiate_files[i] = json.NewEncoder(intermidiate_file)
@@ -141,34 +160,24 @@ func Call(mapf func(string, string) []KeyValue,
 				intermidiate_index := ihash(kva[i].Key) % n_reduce
 				err := intermidiate_files[intermidiate_index].Encode(&kva[i])
 				if err != nil {
-					// log.Fatalf("mr-%d-%d写入失败\n", index, intermidiate_index)
+					log.Fatalf("mr-%d-%d写入失败\n", index, intermidiate_index)
+					make_response(false, "map", index)
 				}
 			}
 
 			//成功后生成一个回应，通过调用Coordinator的Response函数告诉coordinator
-			args := Args{}
-			args.Type = "map"
-			args.Map_finished = true
-			args.Map_index = index
+			make_response(true, "map", index)
 
-			reply = Reply{}
-
-			ok := call("Coordinator.Response", &args, &reply)
-			if ok {
-				// fmt.Printf("response successful for map index %d\n", index)
-			} else {
-				// fmt.Printf("response failed for map index %d\n", index)
-			}
 		} else if task_type == "reduce" {
 			//reduce任务
-			index := reply.Index
 			intermidiate_files := reply.Intermediatefiles
 			//先把对应的一系列文件转化成kv对
 			kva := []KeyValue{}
 			for _, filename := range intermidiate_files {
 				file, err := os.Open(filename)
 				if err != nil {
-					// log.Fatalf("cannot open %v", filename)
+					log.Fatalf("cannot open %v", filename)
+					make_response(false, "reduce", index)
 				}
 				defer file.Close()
 
@@ -209,24 +218,9 @@ func Call(mapf func(string, string) []KeyValue,
 			ofile.Close()
 
 			//调用Coordinator的Response告诉master已经完成reduce任务
-			args := Args{}
-			args.Reduce_finished = true
-			args.Type = "reduce"
-			args.Reduce_index = index
-
-			reply := Reply{}
-
-			ok := call("Coordinator.Response", &args, &reply)
-			if ok {
-				// fmt.Printf("response successful for reduce index %d\n", index)
-			} else {
-				// fmt.Printf("response failed for reduce index %d\n", index)
-			}
+			make_response(true, "reduce", index)
 		}
-	} else {
-
 	}
-
 }
 
 //
@@ -245,10 +239,5 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	defer c.Close()
 
 	err = c.Call(rpcname, args, reply)
-	if err == nil {
-		return true
-	}
-
-	// fmt.Println(err)
-	return false
+	return err == nil
 }
