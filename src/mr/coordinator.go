@@ -46,6 +46,8 @@ type Coordinator struct {
 
 	//加锁保护input_index数组和reduce_index数组的操作
 	m sync.Mutex
+
+	cond *sync.Cond
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -63,50 +65,48 @@ type Coordinator struct {
 //用于worker调用这个函数，用来获取对应的处理文件
 func (c *Coordinator) Gettask(args *Args, reply *Reply) error {
 	// fmt.Println(c.files[0])
-	for {
-		c.m.Lock()
-		if !c.map_finished && len(c.input_index) > 0 {
-			reply.Type = "map"
-			reply.Index = c.input_index[0]
-			reply.File = c.input_index_to_files[c.input_index[0]]
 
-			//每次获取文件都要重设对应的编号的计时器
-			if !c.map_timers[c.input_index[0]].Stop() {
-				select {
-				case <-c.map_timers[c.input_index[0]].C:
-				default:
-				}
-			}
-			c.map_timers[c.input_index[0]].Reset(10 * time.Second)
-
-			reply.NReduce = c.nReduce
-			c.input_index = c.input_index[1:]
-
-			c.m.Unlock()
-
-			break
-
-		} else if c.map_finished && !c.reduce_finished && len(c.reduce_index) > 0 {
-			reply.Type = "reduce"
-			reply.Index = c.reduce_index[0]
-			reply.Intermediatefiles = c.reduce_index_to_files[c.reduce_index[0]]
-
-			if !c.reduce_timers[c.reduce_index[0]].Stop() {
-				select {
-				case <-c.reduce_timers[c.reduce_index[0]].C:
-				default:
-				}
-			}
-			c.reduce_timers[c.reduce_index[0]].Reset(10 * time.Second)
-
-			c.reduce_index = c.reduce_index[1:]
-
-			c.m.Unlock()
-
-			break
-		}
-		c.m.Unlock()
+	c.m.Lock()
+	//只要不满足条件，当前worker请求就会被阻塞在wait，其它请求被阻塞再上面的lock
+	//唤醒时机：input_index或者reduce_index有新元素进来（超时或者没有完成任务的response），或者状态转换时(map任务已全部完成)
+	for !c.map_finished && len(c.input_index) == 0 || c.map_finished && !c.reduce_finished && len(c.reduce_index) == 0 || c.reduce_finished {
+		c.cond.Wait()
 	}
+
+	if !c.map_finished && len(c.input_index) > 0 {
+		reply.Type = "map"
+		reply.Index = c.input_index[0]
+		reply.File = c.input_index_to_files[c.input_index[0]]
+
+		//每次获取文件都要重设对应的编号的计时器
+		if !c.map_timers[c.input_index[0]].Stop() {
+			select {
+			case <-c.map_timers[c.input_index[0]].C:
+			default:
+			}
+		}
+		c.map_timers[c.input_index[0]].Reset(10 * time.Second)
+
+		reply.NReduce = c.nReduce
+		c.input_index = c.input_index[1:]
+
+	} else if c.map_finished && !c.reduce_finished && len(c.reduce_index) > 0 {
+		reply.Type = "reduce"
+		reply.Index = c.reduce_index[0]
+		reply.Intermediatefiles = c.reduce_index_to_files[c.reduce_index[0]]
+
+		if !c.reduce_timers[c.reduce_index[0]].Stop() {
+			select {
+			case <-c.reduce_timers[c.reduce_index[0]].C:
+			default:
+			}
+		}
+		c.reduce_timers[c.reduce_index[0]].Reset(10 * time.Second)
+
+		c.reduce_index = c.reduce_index[1:]
+
+	}
+	c.m.Unlock()
 
 	// fmt.Println(reply.File, reply.NReduce)
 	return nil
@@ -128,12 +128,14 @@ func (c *Coordinator) Response(args *Args, reply *Reply) error {
 				}
 				if c.has_mapped_cnt == c.tot_input {
 					//map任务完成后开启reduce计时器检查
+					c.cond.Broadcast()
 					go c.Reduce_check_timer()
 					c.map_finished = true
 				}
 			} else {
 				//若返回来的响应是处理失败，则重新将任务加入队列，后面交给其它worker
 				c.input_index = append(c.input_index, args.Map_index)
+				c.cond.Broadcast()
 			}
 		}
 	} else {
@@ -146,6 +148,7 @@ func (c *Coordinator) Response(args *Args, reply *Reply) error {
 				}
 			} else {
 				c.reduce_index = append(c.reduce_index, args.Reduce_index)
+				c.cond.Broadcast()
 			}
 		}
 	}
@@ -178,8 +181,10 @@ func (c *Coordinator) check_timer(Type string, index int, timer *time.Timer) {
 		c.m.Lock()
 		if Type == "map" {
 			c.input_index = append(c.input_index, index)
+			c.cond.Broadcast()
 		} else {
 			c.reduce_index = append(c.reduce_index, index)
+			c.cond.Broadcast()
 		}
 		c.m.Unlock()
 	//若没东西，说明无超时，此时执行default，然后退出
@@ -286,6 +291,8 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	}
 
 	c.server()
+
+	c.cond = sync.NewCond(&c.m)
 
 	//启动map计时检查器
 	go c.Map_check_timer()
