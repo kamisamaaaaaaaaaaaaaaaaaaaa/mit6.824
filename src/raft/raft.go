@@ -221,8 +221,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Term = rf.currentTerm
 	if args.Term <= rf.currentTerm {
 		reply.Success = false
-		// } else if len(rf.log) < args.PrevLogIndex+1 || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		// 	reply.Success = false
+	} else if len(rf.log) < args.PrevLogIndex+1 || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		reply.Success = false
 	} else {
 		reply.Success = true
 
@@ -230,7 +230,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if !rf.electionTimer.Stop() {
 			<-rf.electionTimer.C
 		}
-		rf.electionTimer.Reset(time.Duration(50+(rand.Int63()%300)) * time.Millisecond)
+		rf.electionTimer.Reset(200 * time.Millisecond)
 
 	}
 
@@ -341,11 +341,12 @@ func (rf *Raft) killed() bool {
 func (rf *Raft) Heartbeat() {
 	for {
 		if _, isLeader := rf.GetState(); isLeader {
+			// fmt.Println(rf.me, "发起心跳")
 			rf.resetTimer <- struct{}{}
 		} else {
 			break
 		}
-		time.Sleep(time.Duration(50+(rand.Int63()%300)) * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 	}
 }
 
@@ -420,9 +421,9 @@ func (rf *Raft) Election() {
 				if !has_been_leader {
 					rf.mu.Lock()
 					rf.IsLeader = true
+					has_been_leader = true
 					rf.mu.Unlock()
 
-					has_been_leader = true
 					go rf.Heartbeat()
 				}
 
@@ -449,17 +450,19 @@ func (rf *Raft) ticker() {
 		select {
 		//检查是否有重置超时
 		case <-rf.resetTimer:
+			// fmt.Println(rf.me, "重置时间")
 			if !rf.electionTimer.Stop() {
 				<-rf.electionTimer.C
 			}
-			rf.electionTimer.Reset(time.Duration(50+(rand.Int63()%300)) * time.Millisecond)
+			rf.electionTimer.Reset(time.Duration(400+(rand.Int63()%400)) * time.Millisecond)
 
 			//检查是否选举超时
 		case <-rf.electionTimer.C:
 			//发起选举
+			// fmt.Println(rf.me, "发起选举")
 			go rf.Election()
 
-			rf.electionTimer.Reset(time.Duration(50+(rand.Int63()%300)) * time.Millisecond)
+			rf.electionTimer.Reset(time.Duration(400+(rand.Int63()%400)) * time.Millisecond)
 
 		}
 
@@ -506,7 +509,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	}
 
 	rf.resetTimer = make(chan struct{})
-	rf.electionTimer = time.NewTimer(time.Duration(50+(rand.Int63()%300)) * time.Millisecond)
+	rf.electionTimer = time.NewTimer(time.Duration(400+(rand.Int63()%400)) * time.Millisecond)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
