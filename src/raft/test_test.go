@@ -50,9 +50,11 @@ func TestInitialElection2A(t *testing.T) {
 	cfg.checkOneLeader()
 
 	cfg.end()
+
 }
 
 func TestReElection2A(t *testing.T) {
+
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -90,9 +92,11 @@ func TestReElection2A(t *testing.T) {
 	cfg.checkOneLeader()
 
 	cfg.end()
+
 }
 
 func TestManyElections2A(t *testing.T) {
+
 	servers := 7
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -123,6 +127,7 @@ func TestManyElections2A(t *testing.T) {
 	cfg.checkOneLeader()
 
 	cfg.end()
+
 }
 
 func TestBasicAgree2B(t *testing.T) {
