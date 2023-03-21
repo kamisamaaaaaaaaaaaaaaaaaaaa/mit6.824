@@ -445,25 +445,24 @@ func (rf *Raft) ticker() {
 	for !rf.killed() {
 		// Your code here (2A)
 		// Check if a leader election should be started.
-		if !rf.IsLeader {
-			select {
-			//检查是否有重置超时
-			case <-rf.resetTimer:
-				if !rf.electionTimer.Stop() {
-					<-rf.electionTimer.C
-				}
-				rf.electionTimer.Reset(time.Duration(50+(rand.Int63()%300)) * time.Millisecond)
 
-				//检查是否选举超时
-			case <-rf.electionTimer.C:
-				//发起选举
-				go rf.Election()
-
-				rf.electionTimer.Reset(time.Duration(50+(rand.Int63()%300)) * time.Millisecond)
-
+		select {
+		//检查是否有重置超时
+		case <-rf.resetTimer:
+			if !rf.electionTimer.Stop() {
+				<-rf.electionTimer.C
 			}
+			rf.electionTimer.Reset(time.Duration(50+(rand.Int63()%300)) * time.Millisecond)
+
+			//检查是否选举超时
+		case <-rf.electionTimer.C:
+			//发起选举
+			go rf.Election()
+
+			rf.electionTimer.Reset(time.Duration(50+(rand.Int63()%300)) * time.Millisecond)
 
 		}
+
 	}
 }
 
