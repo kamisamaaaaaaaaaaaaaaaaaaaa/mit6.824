@@ -80,6 +80,27 @@ type Raft struct {
 
 	resetTimer    chan struct{}
 	electionTimer *time.Timer
+
+	commitCond   *sync.Cond
+	newEntryCond []*sync.Cond
+
+	applyChan chan ApplyMsg
+
+	shutdown chan struct{}
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // return currentTerm and whether this server
@@ -178,6 +199,9 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+
+	ConflictTerm int
+	FirstIndex   int
 }
 
 // example RequestVote RPC handler.
@@ -216,47 +240,78 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	// fmt.Println("收到了来自", args.LeaderCommit, "的心跳")
+	select {
+	case <-rf.shutdown:
+		return
+	default:
+	}
+
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
-	reply.Term = rf.currentTerm
-	if args.Term <= rf.currentTerm {
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
 		reply.Success = false
-	} else if len(rf.log) < args.PrevLogIndex+1 || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		reply.Success = false
-	} else {
-		reply.Success = true
+		return
+	}
 
+	if rf.IsLeader {
 		rf.IsLeader = false
-		if !rf.electionTimer.Stop() {
-			<-rf.electionTimer.C
+		rf.wakeupConsistencyCheck()
+	}
+
+	if rf.votedFor != args.LeaderId {
+		rf.votedFor = args.LeaderId
+	}
+
+	if rf.currentTerm < args.Term {
+		rf.currentTerm = args.Term
+	}
+
+	rf.resetTimer <- struct{}{}
+
+	preLogIdx, preLogTerm := 0, 0
+
+	if len(rf.log) > args.PrevLogIndex {
+		preLogIdx = args.PrevLogIndex
+		preLogTerm = rf.log[preLogIdx].Term
+	}
+
+	if preLogIdx == args.PrevLogIndex && preLogTerm == args.PrevLogTerm {
+		reply.Success = true
+		rf.log = rf.log[:preLogIdx+1]
+		rf.log = append(rf.log, args.Entries...)
+		var last = len(rf.log) - 1
+
+		if args.LeaderCommit > rf.commitIndex {
+			rf.commitIndex = min(args.LeaderCommit, last)
+			go func() {
+				rf.commitCond.Broadcast()
+			}()
 		}
-		rf.electionTimer.Reset(200 * time.Millisecond)
 
-	}
+		reply.ConflictTerm = rf.log[last].Term
+		reply.FirstIndex = last
+	} else {
+		reply.Success = false
 
-	// fmt.Println("leader id: ", args.LeaderId, " logs长度: ", len(args.Entries))
-	first_inconsistent := 0
-	for ; first_inconsistent < len(args.Entries) && first_inconsistent < len(rf.log); first_inconsistent++ {
-		if args.Entries[first_inconsistent].Term != rf.log[first_inconsistent].Term {
-			break
-		}
-	}
+		var first = 1
+		reply.ConflictTerm = preLogTerm
 
-	if first_inconsistent > 0 {
-		rf.log = rf.log[:first_inconsistent]
-	}
-	for i := first_inconsistent; i < len(args.Entries); i++ {
-		rf.log = append(rf.log, args.Entries[i])
-	}
-
-	if args.LeaderCommit > rf.commitIndex {
-		if args.LeaderCommit <= len(rf.log)-1 {
-			rf.commitIndex = args.LeaderCommit
+		if reply.ConflictTerm == 0 {
+			first = len(rf.log)
+			reply.ConflictTerm = rf.log[first-1].Term
 		} else {
-			rf.commitIndex = len(rf.log) - 1
+			for i := preLogIdx - 1; i > 0; i-- {
+				if rf.log[i].Term != preLogTerm {
+					first = i + 1
+					break
+				}
+			}
 		}
+
+		reply.FirstIndex = first
 	}
-	rf.mu.Unlock()
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -309,12 +364,42 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // if it's ever committed. the second return value is the current
 // term. the third return value is true if this server believes it is
 // the leader.
+
+func (rf *Raft) wakeupConsistencyCheck() {
+	for i := 0; i < len(rf.peers); i++ {
+		if i != rf.me {
+			rf.newEntryCond[i].Broadcast()
+		}
+	}
+}
+
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
-	term := -1
-	isLeader := true
+	term := 0
+	isLeader := false
 
 	// Your code here (2B).
+	select {
+	case <-rf.shutdown:
+		return index, term, isLeader
+	default:
+	}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if rf.IsLeader {
+		log := LogEntry{Command: command, Term: rf.currentTerm}
+		rf.log = append(rf.log, log)
+		index = len(rf.log) - 1
+		term = rf.currentTerm
+		isLeader = true
+
+		rf.nextIndex[rf.me] = index + 1
+		rf.matchIndex[rf.me] = index
+
+		rf.wakeupConsistencyCheck()
+	}
 
 	return index, term, isLeader
 }
@@ -382,19 +467,6 @@ func (rf *Raft) Election() {
 
 				reply := RequestVoteReply{}
 
-				// done := make(chan bool, 1)
-				// go func() {
-				// 	ok := rf.sendRequestVote(u, &args, &reply)
-				// 	done <- ok
-				// }()
-
-				// select {
-				// case ok := <-done:
-				// 	if !ok {
-				// 		return
-				// 	}
-				// 	replies <- reply
-				// }
 				ok := rf.sendRequestVote(u, &args, &reply)
 				if !ok {
 					return
@@ -424,7 +496,11 @@ func (rf *Raft) Election() {
 					has_been_leader = true
 					rf.mu.Unlock()
 
+					rf.resetOnElection()
+
 					go rf.Heartbeat()
+
+					go rf.logEntryAgree()
 				}
 
 			}
@@ -440,6 +516,140 @@ func (rf *Raft) Election() {
 		}
 	}
 
+}
+
+func (rf *Raft) logEntryAgree() {
+	for i := 0; i < len(rf.peers); i++ {
+		if i != rf.me {
+			go rf.consistencyCheck(i)
+		}
+	}
+}
+
+func (rf *Raft) consistencyCheck(u int) {
+	for {
+		rf.mu.Lock()
+		rf.newEntryCond[u].Wait()
+
+		select {
+		case <-rf.shutdown:
+			rf.mu.Unlock()
+			return
+		default:
+		}
+
+		if rf.IsLeader {
+			var args AppendEntriesArgs
+			args.LeaderCommit = rf.commitIndex
+			args.LeaderId = rf.me
+			args.PrevLogIndex = rf.nextIndex[u] - 1
+			args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+			args.Term = rf.currentTerm
+
+			if rf.nextIndex[u] < len(rf.log) {
+				args.Entries = append(args.Entries, rf.log[rf.nextIndex[u]:]...)
+			} else {
+				args.Entries = nil
+			}
+			rf.mu.Unlock()
+
+			replych := make(chan AppendEntriesReply, 1)
+			go func() {
+				var reply AppendEntriesReply
+
+				if rf.sendAppendEntries(u, &args, &reply) {
+					replych <- reply
+				}
+			}()
+
+			select {
+			case reply := <-replych:
+				rf.mu.Lock()
+				if reply.Success {
+					rf.matchIndex[u] = reply.FirstIndex
+					rf.nextIndex[u] = rf.matchIndex[u] + 1
+					//TODO更新索引
+					rf.updateCommitIndex()
+				} else {
+					if reply.Term > args.Term {
+						rf.currentTerm = reply.Term
+						rf.votedFor = -1
+
+					}
+
+					if rf.IsLeader {
+						rf.IsLeader = false
+						rf.wakeupConsistencyCheck()
+					}
+					rf.mu.Unlock()
+					rf.resetTimer <- struct{}{}
+					return
+				}
+
+				var know, lastIndex = false, 0
+				if reply.ConflictTerm != 0 {
+					for i := len(rf.log) - 1; i > 0; i-- {
+						if rf.log[i].Term == reply.ConflictTerm {
+							know = true
+							lastIndex = i
+							break
+						}
+					}
+
+					if know {
+						if lastIndex > reply.FirstIndex {
+							lastIndex = reply.FirstIndex
+						}
+						rf.nextIndex[u] = lastIndex
+					} else {
+						rf.nextIndex[u] = reply.FirstIndex
+					}
+
+				} else {
+					rf.nextIndex[u] = reply.FirstIndex
+				}
+
+				rf.nextIndex[u] = min(max(rf.nextIndex[u], 1), len(rf.log))
+			}
+			rf.mu.Unlock()
+
+		} else {
+			rf.mu.Unlock()
+			return
+		}
+	}
+}
+
+func (rf *Raft) updateCommitIndex() {
+	for n := len(rf.log) - 1; n > rf.commitIndex; n-- {
+		if rf.log[n].Term != rf.currentTerm {
+			break
+		}
+
+		cnt := 0
+		for i := 0; i < len(rf.peers); i++ {
+			if rf.matchIndex[i] >= n {
+				cnt++
+				if cnt > len(rf.peers)/2 {
+					rf.commitIndex = n
+					break
+				}
+			}
+		}
+	}
+}
+
+func (rf *Raft) resetOnElection() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	for i := 0; i < len(rf.peers); i++ {
+		rf.nextIndex[i] = len(rf.log)
+		rf.matchIndex[i] = 0
+		if i == rf.me {
+			rf.matchIndex[i] = len(rf.log) - 1
+		}
+	}
 }
 
 func (rf *Raft) ticker() {
@@ -466,6 +676,43 @@ func (rf *Raft) ticker() {
 
 		}
 
+	}
+}
+
+func (rf *Raft) applyEntry() {
+	for {
+		var logs []LogEntry
+
+		rf.mu.Lock()
+		for rf.lastApplied == rf.commitIndex {
+			rf.commitCond.Wait()
+			select {
+			case <-rf.shutdown:
+				close(rf.applyChan)
+				rf.mu.Unlock()
+				return
+			default:
+			}
+
+		}
+
+		last, cur := rf.lastApplied, rf.commitIndex
+		if last < cur {
+			rf.lastApplied = rf.commitIndex
+			logs = make([]LogEntry, cur-last)
+			copy(logs, rf.log[last+1:cur+1])
+		}
+
+		rf.mu.Unlock()
+
+		for i := 0; i < cur-last; i++ {
+			reply := ApplyMsg{
+				CommandIndex: last + 1 + i,
+				Command:      logs[i],
+				CommandValid: true,
+			}
+			rf.applyChan <- reply
+		}
 	}
 }
 
@@ -511,11 +758,19 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.resetTimer = make(chan struct{})
 	rf.electionTimer = time.NewTimer(time.Duration(400+(rand.Int63()%400)) * time.Millisecond)
 
+	rf.commitCond = sync.NewCond(&rf.mu)
+	rf.newEntryCond = make([]*sync.Cond, len(rf.peers))
+	for i := 0; i < len(rf.peers); i++ {
+		rf.newEntryCond[i] = sync.NewCond(&rf.mu)
+	}
+
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	// fmt.Println("id: ", rf.me, " logs长度: ", len(rf.log))
 	// start ticker goroutine to start elections
 	go rf.ticker()
+
+	go rf.applyEntry()
 
 	return rf
 }
