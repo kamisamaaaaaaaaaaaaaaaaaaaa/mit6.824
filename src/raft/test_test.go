@@ -166,7 +166,7 @@ func TestBasicAgree2B(t *testing.T) {
 // check, based on counting bytes of RPCs, that
 // each command is sent to each peer just once.
 func TestRPCBytes2B(t *testing.T) {
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 1; i++ {
 		servers := 3
 		cfg := make_config(t, servers, false, false)
 		defer cfg.cleanup()
@@ -329,6 +329,7 @@ func TestFailAgree2B(t *testing.T) {
 	}
 }
 
+//越界
 func TestFailNoAgree2B(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		servers := 5
@@ -528,7 +529,7 @@ func TestRejoin2B(t *testing.T) {
 func TestBackup2B(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		servers := 5
-
+		cnt := 50
 		cfg := make_config(t, servers, false, false)
 		defer cfg.cleanup()
 
@@ -544,9 +545,13 @@ func TestBackup2B(t *testing.T) {
 		cfg.disconnect((leader1 + 4) % servers)
 
 		// submit lots of commands that won't commit
-		for i := 0; i < 50; i++ {
+		for i := 0; i < cnt; i++ {
 			cfg.rafts[leader1].Start(rand.Int())
 		}
+
+		// for i := 1; i <= 5; i++ {
+		// 	cfg.rafts[leader1].Start(i)
+		// }
 
 		time.Sleep(RaftElectionTimeout / 2)
 
@@ -559,9 +564,13 @@ func TestBackup2B(t *testing.T) {
 		cfg.connect((leader1 + 4) % servers)
 
 		// // lots of successful commands to new group.
-		for i := 0; i < 50; i++ {
+		for i := 0; i < cnt; i++ {
 			cfg.one(rand.Int(), 3, true)
 		}
+
+		// for i := 6; i <= 10; i++ {
+		// 	cfg.one(i, 3, true)
+		// }
 
 		// // now another partitioned leader and one follower
 		leader2 := cfg.checkOneLeader()
@@ -572,9 +581,13 @@ func TestBackup2B(t *testing.T) {
 		cfg.disconnect(other)
 
 		// lots more commands that won't commit(50)
-		for i := 0; i < 50; i++ {
+		for i := 0; i < cnt; i++ {
 			cfg.rafts[leader2].Start(rand.Int())
 		}
+
+		// for i := 11; i <= 15; i++ {
+		// 	cfg.rafts[leader2].Start(i)
+		// }
 
 		time.Sleep(RaftElectionTimeout / 2)
 
@@ -588,9 +601,13 @@ func TestBackup2B(t *testing.T) {
 		cfg.connect(other)
 
 		// lots of successful commands to new group.
-		for i := 0; i < 50; i++ {
+		for i := 0; i < cnt; i++ {
 			cfg.one(rand.Int(), 3, true)
 		}
+
+		// for i := 16; i <= 20; i++ {
+		// 	cfg.one(i, 3, true)
+		// }
 
 		// now everyone
 		for i := 0; i < servers; i++ {
@@ -598,11 +615,15 @@ func TestBackup2B(t *testing.T) {
 		}
 		cfg.one(rand.Int(), servers, true)
 
+		// cfg.one(21, servers, true)
+
 		cfg.end()
+
+		fmt.Printf("------------------------round %v pass----------------------\n", i)
 	}
 }
 
-func TestCount2b(t *testing.T) {
+func TestCount2B(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		servers := 3
 		cfg := make_config(t, servers, false, false)

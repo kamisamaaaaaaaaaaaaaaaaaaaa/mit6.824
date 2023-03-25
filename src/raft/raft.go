@@ -81,14 +81,11 @@ type Raft struct {
 	resetTimer    chan struct{}
 	electionTimer *time.Timer
 
-	commitCond   *sync.Cond
-	newEntryCond []*sync.Cond
+	commitCond *sync.Cond
 
 	applyChan chan ApplyMsg
 
 	shutdown chan struct{}
-
-	checkleader *sync.Cond
 }
 
 func max(a, b int) int {
@@ -121,7 +118,6 @@ func (rf *Raft) GetState() (int, bool) {
 
 	return term, isleader
 
-	// return term, isleader
 }
 
 // save Raft's persistent state to stable storage,
@@ -202,8 +198,17 @@ type AppendEntriesReply struct {
 	Term    int
 	Success bool
 
-	ConflictTerm int
-	FirstIndex   int
+	//ps:follower回复时告诉leader下一个希望得到的编号
+	//1、若添加成功，返回添加后len(log)
+	//2、若添加失败：
+	//（1）日志比leader日志短，此时返回len(log)
+	// (2)若previndex的term冲突，此时返回previndex，希望leader下次发previndex过来，直到匹配位置，leader
+	//    的nextindex[u]每次往后退一步
+	// ps:（1）可以合并到2，但为了减少处理冲突的时间（心跳次数），将(1)单独处理，增加效率，但由于每次只后退一步
+	//     所以处理冲突的时间仍然较长，需要多次心跳才能找到非冲突部分和冲突部分的分界点，这里想通过测试有时候需要
+	//     增加达成agreement的最大允许时间，或增加client重传次数，每次重传都会将nextindex[u]往前移一点
+	//优化：可考虑二分，有二段性（找到分界点，使前面的部分一致，后面部分开始不一致）
+	NextIndex int
 }
 
 // example RequestVote RPC handler.
@@ -230,8 +235,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = -1
 		reply.VoteGranted = false
 
-		rf.checkleader.Broadcast()
-
 		// }
 		if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
 			if args.LastLogTerm == rf.log[len(rf.log)-1].Term && args.LastLogIndex >= len(rf.log)-1 ||
@@ -239,7 +242,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 				rf.resetTimer <- struct{}{}
 
 				rf.IsLeader = false
-				rf.checkleader.Broadcast()
+
 				// fmt.Printf("%v的isleader变为false\n", rf.me)
 				rf.votedFor = args.CandidateId
 
@@ -273,9 +276,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if rf.IsLeader {
 		// fmt.Printf("%v的isleader变为false\n", rf.me)
 		rf.IsLeader = false
-		rf.checkleader.Broadcast()
-		// 	rf.wakeupConsistencyCheck()
-		// }
 	}
 
 	if rf.votedFor != args.LeaderId {
@@ -289,52 +289,40 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	rf.resetTimer <- struct{}{}
 
-	preLogIdx, preLogTerm := 0, 0
-
-	if len(rf.log) > args.PrevLogIndex {
-		preLogIdx = args.PrevLogIndex
-		preLogTerm = rf.log[preLogIdx].Term
-	}
-
 	// fmt.Printf("%v原来的log为:%v,接收到的log为:%v\n", rf.me, rf.log, args.Entries)
-	if preLogIdx == args.PrevLogIndex && preLogTerm == args.PrevLogTerm {
+
+	//ps:follower回复时告诉leader下一个希望得到的编号
+	//1、若添加成功，返回添加后len(log)
+	//2、若添加失败：
+	//（1）日志比leader日志短，此时返回len(log)
+	// (2)若previndex的term冲突，此时返回previndex，希望leader下次发previndex过来，直到匹配位置，leader
+	//    的nextindex[u]每次往后退一步
+	// ps:（1）可以合并到2，但为了减少处理冲突的时间（心跳次数），将(1)单独处理，增加效率，但由于每次只后退一步
+	//     所以处理冲突的时间仍然较长，需要多次心跳才能找到非冲突部分和冲突部分的分界点，这里想通过测试有时候需要
+	//     增加达成agreement的最大允许时间，或增加client重传次数，每次重传都会将nextindex[u]往前移一点
+
+	if len(rf.log) < args.PrevLogIndex+1 || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		reply.Success = false
+		if len(rf.log) < args.PrevLogIndex {
+			reply.NextIndex = len(rf.log)
+		} else {
+			reply.NextIndex = args.PrevLogIndex
+		}
+	} else {
 		reply.Success = true
-		rf.log = rf.log[:preLogIdx+1]
+		rf.log = rf.log[:args.PrevLogIndex+1]
 		rf.log = append(rf.log, args.Entries...)
-		var last = len(rf.log) - 1
+		reply.NextIndex = len(rf.log)
 
 		if args.LeaderCommit > rf.commitIndex {
-			rf.commitIndex = min(args.LeaderCommit, last)
+			rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
 			// fmt.Printf("%v收到%v的logrepli,commitindex更新为%v\n", rf.me, args.LeaderId, rf.commitIndex)
 			go func() {
 				rf.commitCond.Broadcast()
 			}()
 		}
-
-		reply.ConflictTerm = rf.log[last].Term
-		reply.FirstIndex = last
-	} else {
-		reply.Success = false
-
-		var first = 1
-		reply.ConflictTerm = preLogTerm
-
-		if reply.ConflictTerm == 0 {
-			first = len(rf.log)
-			reply.ConflictTerm = rf.log[first-1].Term
-		} else {
-			for i := preLogIdx - 1; i > 0; i-- {
-				if rf.log[i].Term != preLogTerm {
-					first = i + 1
-					break
-				}
-			}
-		}
-
-		reply.FirstIndex = first
 	}
 
-	// fmt.Printf("%v的log变为:%v\n", rf.me, rf.log)
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -414,9 +402,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.matchIndex[rf.me] = index
 
 		rf.mu.Unlock()
-		// go rf.SingleReplcate()
 
-		// rf.wakeupConsistencyCheck()
 	} else {
 		rf.mu.Unlock()
 	}
@@ -477,6 +463,12 @@ func (rf *Raft) SingleReplcate() {
 
 				rf.FillAppendEntriesArgs(u, &args)
 
+				//若该leader为非法leader，会收到其它协程follower的失败回复，并更新自己的term
+				//在下面更新自己term时会拿到锁，导致当前协程的fillargs被阻塞，当改完自己的term，
+				//后，才会放开锁执行fillargs，但此时term已经不是原来的term了，也就是会拿着修改后的
+				//的term带着旧日志发过去，由于此时term是最新的，follower会误以为当前心跳合法，然后用
+				//非法的旧日志去更新已经提交的日志。若原本有leader的话，该leader收到该心跳后，还会变回
+				//follower。所以在send之前要及时判断，若term已经修改过，isleader变为false，则停止发送
 				if _, isleader := rf.GetState(); !isleader {
 					return
 				}
@@ -487,10 +479,11 @@ func (rf *Raft) SingleReplcate() {
 					return
 				}
 
-				// fmt.Printf("leader:%v，%v的回复的内容为:term : %v success:%v confi:%v first:%v\n", rf.me, u, reply.Term, reply.Success, reply.ConflictTerm, reply.FirstIndex)
+				// fmt.Printf("leader:%v，%v的回复的内容为:term : %v success:%v nextindex:%v\n", rf.me, u, reply.Term, reply.Success, reply.NextIndex)
 				rf.mu.Lock()
 				if reply.Success {
-					rf.matchIndex[u] = reply.FirstIndex
+					// rf.matchIndex[u] = reply.FirstIndex
+					rf.matchIndex[u] = reply.NextIndex - 1
 					rf.nextIndex[u] = rf.matchIndex[u] + 1
 					// fmt.Printf("leader %v 收到了 %v 的成功回复，对应的next变为 %v,match变为 %v\n", rf.me, u, rf.nextIndex[u], rf.matchIndex[u])
 					//TODO更新索引
@@ -510,29 +503,8 @@ func (rf *Raft) SingleReplcate() {
 
 					}
 
-					var know, lastIndex = false, 0
-					if reply.ConflictTerm != 0 {
-						for i := len(rf.log) - 1; i > 0; i-- {
-							if rf.log[i].Term == reply.ConflictTerm {
-								know = true
-								lastIndex = i
-								break
-							}
-						}
+					rf.nextIndex[u] = reply.NextIndex
 
-						if know {
-							if lastIndex > reply.FirstIndex {
-								lastIndex = reply.FirstIndex
-							}
-							rf.nextIndex[u] = lastIndex
-						} else {
-							rf.nextIndex[u] = reply.FirstIndex
-						}
-
-					} else {
-						rf.nextIndex[u] = reply.FirstIndex
-					}
-					// fmt.Printf("leader 为 %v，%v此时的next变为 %v,match变为 %v\n", rf.me, u, rf.nextIndex[u], rf.matchIndex[u])
 				}
 				rf.nextIndex[u] = min(max(rf.nextIndex[u], 1), len(rf.log))
 				// fmt.Printf("leader 为 %v，%v最终的next变为 %v,match变为 %v\n", rf.me, u, rf.nextIndex[u], rf.matchIndex[u])
@@ -546,15 +518,18 @@ func (rf *Raft) SingleReplcate() {
 
 	wg.Wait()
 	// fmt.Printf("leader %v (是否为leader: %v)wait结束\n", rf.me, rf.IsLeader)
-
 }
 
 func (rf *Raft) LogReplication() {
 	for {
 		if _, isLeader := rf.GetState(); isLeader {
 			// fmt.Printf("%v发起心跳，term为%v\n", rf.me, rf.currentTerm)
+
+			//重置leader时间，防止leader选举超时再次发起选举
 			rf.resetTimer <- struct{}{}
 
+			//这里一定要开协程，否则每次wait之前还要等该轮响应处理完，耗时长，导致心跳间隔变大，使follower容易
+			//选举超时发起选举
 			go rf.SingleReplcate()
 		} else {
 			// fmt.Printf("leader %v (是否为leader: %v) 变回follower\n", rf.me, rf.IsLeader)
@@ -567,6 +542,9 @@ func (rf *Raft) LogReplication() {
 
 func (rf *Raft) updateCommitIndex() {
 	// fmt.Printf("%v进入updatecommitindex\n", rf.me)
+
+	//找到最大一个索引，这个索引之前的部分（包括这个索引）被超过半数复制，且当前项的term等于currentterm
+	//这里可以考虑二分来找，有二段性
 	for n := len(rf.log) - 1; n > rf.commitIndex; n-- {
 		if rf.log[n].Term != rf.currentTerm {
 			// fmt.Printf("update失败\n")
@@ -672,7 +650,6 @@ func (rf *Raft) Election() {
 			rf.mu.Lock()
 			rf.currentTerm = reply.Term
 			rf.IsLeader = false
-			rf.checkleader.Broadcast()
 			rf.votedFor = -1
 			rf.mu.Unlock()
 			rf.resetTimer <- struct{}{}
@@ -683,7 +660,6 @@ func (rf *Raft) Election() {
 	if !has_been_leader {
 		// fmt.Printf("%v收到的选票不够，当选失败\n", rf.me)
 		rf.IsLeader = false
-		rf.checkleader.Broadcast()
 	}
 
 }
@@ -705,12 +681,6 @@ func (rf *Raft) ticker() {
 	for !rf.killed() {
 		// Your code here (2A)
 		// Check if a leader election should be started.
-
-		// rf.mu.Lock()
-		// for rf.IsLeader {
-		// 	rf.checkleader.Wait()
-		// }
-		// rf.mu.Unlock()
 
 		select {
 		//检查是否有重置超时
@@ -757,10 +727,6 @@ func (rf *Raft) applyEntry() {
 			logs = make([]LogEntry, cur-last)
 			copy(logs, rf.log[last+1:cur+1])
 		}
-
-		// if rf.IsLeader {
-		// 	go rf.SingleReplcate()
-		// }
 
 		rf.mu.Unlock()
 
@@ -822,12 +788,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.electionTimer = time.NewTimer(time.Duration(400+(rand.Int63()%400)) * time.Millisecond)
 
 	rf.commitCond = sync.NewCond(&rf.mu)
-	rf.newEntryCond = make([]*sync.Cond, len(rf.peers))
-	for i := 0; i < len(rf.peers); i++ {
-		rf.newEntryCond[i] = sync.NewCond(&rf.mu)
-	}
-
-	rf.checkleader = sync.NewCond(&rf.mu)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
