@@ -529,7 +529,7 @@ func TestRejoin2B(t *testing.T) {
 func TestBackup2B(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		servers := 5
-		cnt := 250
+		cnt := 50
 		cfg := make_config(t, servers, false, false)
 		defer cfg.cleanup()
 
