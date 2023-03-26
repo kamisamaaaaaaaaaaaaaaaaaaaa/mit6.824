@@ -75,7 +75,11 @@ type Raft struct {
 	commitIndex int
 	lastApplied int
 
-	nextIndex  []int
+	nextIndex []int
+
+	//存取每个u对应的prevlogindex的区间
+	sectionForPrevIndex [][]int
+
 	matchIndex []int
 
 	resetTimer    chan struct{}
@@ -186,28 +190,20 @@ type RequestVoteReply struct {
 }
 
 type AppendEntriesArgs struct {
-	Term         int
-	LeaderId     int
-	PrevLogIndex int
-	PrevLogTerm  int
-	Entries      []LogEntry
-	LeaderCommit int
+	Term          int
+	LeaderId      int
+	PrevLogIndex  int
+	PrevLogTerm   int
+	Entries       []LogEntry
+	LeaderCommit  int
+	FindPrevIndex bool
 }
 
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
 
-	//ps:follower回复时告诉leader下一个希望得到的编号
-	//1、若添加成功，返回添加后len(log)
-	//2、若添加失败：
-	//（1）日志比leader日志短，此时返回len(log)
-	// (2)若previndex的term冲突，此时返回previndex，希望leader下次发previndex过来，直到匹配位置，leader
-	//    的nextindex[u]每次往后退一步
-	// ps:（1）可以合并到2，但为了减少处理冲突的时间（心跳次数），将(1)单独处理，增加效率，但由于每次只后退一步
-	//     所以处理冲突的时间仍然较长，需要多次心跳才能找到非冲突部分和冲突部分的分界点，这里想通过测试有时候需要
-	//     增加达成agreement的最大允许时间，或增加client重传次数，每次重传都会将nextindex[u]往前移一点
-	//优化：可考虑二分，有二段性（找到分界点，使前面的部分一致，后面部分开始不一致）
+	//成功添加log时，或者二分探测不匹配是由日志更短导致时，返回len(rf.log)
 	NextIndex int
 }
 
@@ -291,37 +287,35 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// fmt.Printf("%v原来的log为:%v,接收到的log为:%v\n", rf.me, rf.log, args.Entries)
 
-	//ps:follower回复时告诉leader下一个希望得到的编号
-	//1、若添加成功，返回添加后len(log)
-	//2、若添加失败：
-	//（1）日志比leader日志短，此时返回len(log)
-	// (2)若previndex的term冲突，此时返回previndex，希望leader下次发previndex过来，直到匹配位置，leader
-	//    的nextindex[u]每次往后退一步
-	// ps:（1）可以合并到2，但为了减少处理冲突的时间（心跳次数），将(1)单独处理，增加效率，但由于每次只后退一步
-	//     所以处理冲突的时间仍然较长，需要多次心跳才能找到非冲突部分和冲突部分的分界点，这里想通过测试有时候需要
-	//     增加达成agreement的最大允许时间，或增加client重传次数，每次重传都会将nextindex[u]往前移一点
-
+	//二分失败，返回失败响应
 	if len(rf.log) < args.PrevLogIndex+1 || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		reply.Success = false
-		if len(rf.log) < args.PrevLogIndex {
+		reply.NextIndex = 0
+		//如果是由于日志长度较短导致的，返回日志长度，方便右端点更新
+		if len(rf.log) < args.PrevLogIndex+1 {
 			reply.NextIndex = len(rf.log)
-		} else {
-			reply.NextIndex = args.PrevLogIndex
 		}
+
 	} else {
 		reply.Success = true
-		rf.log = rf.log[:args.PrevLogIndex+1]
-		rf.log = append(rf.log, args.Entries...)
-		reply.NextIndex = len(rf.log)
 
-		if args.LeaderCommit > rf.commitIndex {
-			rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
-			// fmt.Printf("%v收到%v的logrepli,commitindex更新为%v\n", rf.me, args.LeaderId, rf.commitIndex)
-			go func() {
-				rf.commitCond.Broadcast()
-			}()
+		//非二分探测报文的话，成功后添加日志，若为二分探测报文，则直接返回成功响应
+		if !args.FindPrevIndex {
+			rf.log = rf.log[:args.PrevLogIndex+1]
+			rf.log = append(rf.log, args.Entries...)
+			reply.NextIndex = len(rf.log)
+
+			if args.LeaderCommit > rf.commitIndex {
+				rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+				// fmt.Printf("%v收到%v的logrepli,commitindex更新为%v\n", rf.me, args.LeaderId, rf.commitIndex)
+				go func() {
+					rf.commitCond.Broadcast()
+				}()
+			}
 		}
 	}
+
+	// fmt.Printf("%v 的 log 变为: %v\n", rf.me, rf.log)
 
 }
 
@@ -434,18 +428,31 @@ func (rf *Raft) FillAppendEntriesArgs(u int, args *AppendEntriesArgs) {
 
 	args.LeaderCommit = rf.commitIndex
 	args.LeaderId = rf.me
-	args.PrevLogIndex = rf.nextIndex[u] - 1
-	args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
 	args.Term = rf.currentTerm
 
-	if rf.nextIndex[u] < len(rf.log) {
+	left := rf.sectionForPrevIndex[u][0]
+	right := rf.sectionForPrevIndex[u][1]
+
+	//对于每个leader来说，如果left=right，说明已经找到分界点，冲突处理完成，后面只需直接添加或者覆盖follower后面的日志即可
+	if left == right {
+		args.PrevLogIndex = rf.nextIndex[u] - 1
+		args.FindPrevIndex = false
+	} else {
+		//发送二分探测报文
+		args.PrevLogIndex = (left + right + 1) / 2
+		args.FindPrevIndex = true
+	}
+	args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+
+	if rf.nextIndex[u] < len(rf.log) && left == right {
 		args.Entries = append(args.Entries, rf.log[rf.nextIndex[u]:]...)
 	} else {
+		//二分探测报文或者没有数据发时发nil即可，减少通信字节数
 		args.Entries = nil
 	}
 
-	// fmt.Printf("%v 发给 %v 的 rpc内容为：leadercommit:%v leader_id: %v prevlogindex:%v prevlogterm:%v term:%v logs:%v\n ",
-	// rf.me, u, args.LeaderCommit, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, args.Term, args.Entries)
+	// fmt.Printf("%v 发给 %v 的 rpc内容为：Find:%v, leadercommit:%v leader_id: %v prevlogindex:%v prevlogterm:%v term:%v logs:%v\n ",
+	// rf.me, u, args.FindPrevIndex, args.LeaderCommit, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, args.Term, args.Entries)
 
 	rf.mu.Unlock()
 }
@@ -481,21 +488,21 @@ func (rf *Raft) SingleReplcate() {
 
 				// fmt.Printf("leader:%v，%v的回复的内容为:term : %v success:%v nextindex:%v\n", rf.me, u, reply.Term, reply.Success, reply.NextIndex)
 				rf.mu.Lock()
-				if reply.Success {
-					// rf.matchIndex[u] = reply.FirstIndex
+				if reply.Success && !args.FindPrevIndex {
 					rf.matchIndex[u] = reply.NextIndex - 1
 					rf.nextIndex[u] = rf.matchIndex[u] + 1
-					// fmt.Printf("leader %v 收到了 %v 的成功回复，对应的next变为 %v,match变为 %v\n", rf.me, u, rf.nextIndex[u], rf.matchIndex[u])
+
+					// fmt.Printf("leader %v 收到了 %v 的成功回复，对应的next变为 %v,match变为 %v,left变为%v,right变为%v\n", rf.me, u, rf.nextIndex[u], rf.matchIndex[u], rf.sectionForPrevIndex[u][0], rf.sectionForPrevIndex[u][1])
 					//TODO更新索引
 					rf.updateCommitIndex()
 				} else {
+					// fmt.Printf("leader %v 收到了 %v 的失败回复\n", rf.me, u)
 					if reply.Term > args.Term {
+						// fmt.Printf("follower %v 的term %v 比自己leader %v 的term %v大，更新并放弃leader\n", u, reply.Term, rf.me, rf.currentTerm)
 						rf.currentTerm = reply.Term
 						rf.votedFor = -1
 						if rf.IsLeader {
 							rf.IsLeader = false
-							// rf.checkleader.Broadcast()
-							// rf.wakeupConsistencyCheck()
 						}
 						rf.mu.Unlock()
 						rf.resetTimer <- struct{}{}
@@ -503,7 +510,33 @@ func (rf *Raft) SingleReplcate() {
 
 					}
 
-					rf.nextIndex[u] = reply.NextIndex
+					//收到二分回应，更新[lmr]
+					//if(匹配) l=mid
+					//else r=mid-1
+					left := rf.sectionForPrevIndex[u][0]
+					right := rf.sectionForPrevIndex[u][1]
+					mid := (left + right + 1) / 2
+					// fmt.Printf("leader %v 对应 follower %v 的原区间为 [%v,%v]，中点为 %v\n", rf.me, u, left, right, mid)
+
+					if reply.Success {
+						// fmt.Printf("leader %v 对应 follower %v 响应成功，将左区间更新为 %v\n", rf.me, u, mid)
+						rf.sectionForPrevIndex[u][0] = mid
+					} else {
+						// fmt.Printf("leader %v 对应 follower %v 响应失败，将右区间更新为 %v\n", rf.me, u, mid-1)
+						rf.sectionForPrevIndex[u][1] = mid - 1
+						if reply.NextIndex != 0 {
+							rf.sectionForPrevIndex[u][1] = min(rf.sectionForPrevIndex[u][1], reply.NextIndex-1)
+						}
+					}
+
+					// fmt.Printf("leader %v 对应 follower %v 的最后区间变为[%v,%v]\n", rf.me, u, rf.sectionForPrevIndex[u][0], rf.sectionForPrevIndex[u][1])
+
+					//如果l==r，此时找到分界点
+					if rf.sectionForPrevIndex[u][0] == rf.sectionForPrevIndex[u][1] {
+						rf.nextIndex[u] = rf.sectionForPrevIndex[u][0] + 1
+
+						// fmt.Printf("leader %v 对应 follower %v 找到分界点 %v ，将nextindex更新为 %v\n", rf.me, u, rf.sectionForPrevIndex[u][0], rf.nextIndex[u])
+					}
 
 				}
 				rf.nextIndex[u] = min(max(rf.nextIndex[u], 1), len(rf.log))
@@ -669,10 +702,13 @@ func (rf *Raft) resetOnElection() {
 	defer rf.mu.Unlock()
 
 	for i := 0; i < len(rf.peers); i++ {
+		rf.sectionForPrevIndex[i][0] = 0
+		rf.sectionForPrevIndex[i][1] = len(rf.log) - 1
 		rf.nextIndex[i] = len(rf.log)
 		rf.matchIndex[i] = 0
 		if i == rf.me {
 			rf.matchIndex[i] = len(rf.log) - 1
+			rf.sectionForPrevIndex[i][0] = len(rf.log) - 1
 		}
 	}
 }
@@ -777,6 +813,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nextIndex = make([]int, len(peers))
 	for i := 0; i < len(peers); i++ {
 		rf.nextIndex[i] = len(rf.log)
+	}
+
+	rf.sectionForPrevIndex = make([][]int, len(peers))
+	for i := 0; i < len(peers); i++ {
+		rf.sectionForPrevIndex[i] = append(rf.sectionForPrevIndex[i], len(rf.log)-1)
+		rf.sectionForPrevIndex[i] = append(rf.sectionForPrevIndex[i], len(rf.log)-1)
 	}
 
 	rf.matchIndex = make([]int, len(peers))
