@@ -20,12 +20,14 @@ package raft
 import (
 	//	"bytes"
 
+	"bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 )
 
@@ -140,6 +142,16 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
@@ -160,6 +172,23 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+
+	var currentTerm int
+	var votedFor int
+	var log []LogEntry
+
+	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
+		//fmt.Printf("------------------decode failed----------------\n")
+	} else {
+
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
+
+	}
 }
 
 // the service says it has created a snapshot that has
@@ -209,23 +238,23 @@ type AppendEntriesReply struct {
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	// fmt.Printf("%v收到了来自%v的投票要求\n", rf.me, args.CandidateId)
+	// //fmt.Printf("%v收到了来自%v的投票要求\n", rf.me, args.CandidateId)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	// fmt.Printf("cand %v 的term为 %v ,当前 %v 的term为 %v\n", args.CandidateId, args.Term, rf.me, rf.currentTerm)
+	// //fmt.Printf("cand %v 的term为 %v ,当前 %v 的term为 %v\n", args.CandidateId, args.Term, rf.me, rf.currentTerm)
 	reply.VoteGranted = false
 
 	//不给同期（同期的cand）或者term小于自己的投票
 	if args.Term <= rf.currentTerm {
-		// fmt.Printf("%v的term %v 小于等于当前 %v 的term %v,不予投票\n", args.CandidateId, args.Term, rf.me, rf.currentTerm)
+		// //fmt.Printf("%v的term %v 小于等于当前 %v 的term %v,不予投票\n", args.CandidateId, args.Term, rf.me, rf.currentTerm)
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
 	} else {
 		//对于投票者要将自己强行转化为follower（可能原本是leader）
 		// if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
-		// fmt.Printf("%v的isleader变为false\n", rf.me)
+		// //fmt.Printf("%v的isleader变为false\n", rf.me)
 		rf.IsLeader = false
 		rf.votedFor = -1
 		reply.VoteGranted = false
@@ -238,20 +267,23 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 				rf.IsLeader = false
 
-				// fmt.Printf("%v的isleader变为false\n", rf.me)
+				// //fmt.Printf("%v的isleader变为false\n", rf.me)
 				rf.votedFor = args.CandidateId
 
 				reply.VoteGranted = true
 
-				// fmt.Printf("%v 给 %v 投票\n", rf.me, args.CandidateId)
+				// //fmt.Printf("%v 给 %v 投票\n", rf.me, args.CandidateId)
 			}
 		}
+
+		rf.persist()
+
 		reply.Term = rf.currentTerm
 	}
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	// fmt.Printf("%v(是否为leader:%v, term为%v)收到了来自%v的心跳(term为%v)\n", rf.me, rf.IsLeader, rf.currentTerm, args.LeaderId, args.Term)
+	//fmt.Printf("%v(是否为leader:%v, term为%v)收到了来自%v的心跳(term为%v)\n", rf.me, rf.IsLeader, rf.currentTerm, args.LeaderId, args.Term)
 	select {
 	case <-rf.shutdown:
 		return
@@ -262,14 +294,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 
 	if args.Term < rf.currentTerm {
-		// fmt.Printf("leader %v 的term %v 比自己 %v 的 term %v 小，拒绝\n", args.LeaderId, args.Term, rf.me, rf.currentTerm)
+		//fmt.Printf("leader %v 的term %v 比自己 %v 的 term %v 小，拒绝\n", args.LeaderId, args.Term, rf.me, rf.currentTerm)
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
 	}
 
 	if rf.IsLeader {
-		// fmt.Printf("%v的isleader变为false\n", rf.me)
+		//fmt.Printf("%v的isleader变为false\n", rf.me)
 		rf.IsLeader = false
 	}
 
@@ -278,13 +310,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	if rf.currentTerm < args.Term {
-		// fmt.Printf("%v收到了leader %v的心跳，将term %v 同步为 %v\n", rf.me, args.LeaderId, rf.currentTerm, args.Term)
+		//fmt.Printf("%v收到了leader %v的心跳，将term %v 同步为 %v\n", rf.me, args.LeaderId, rf.currentTerm, args.Term)
 		rf.currentTerm = args.Term
 	}
 
 	rf.resetTimer <- struct{}{}
 
-	// fmt.Printf("%v原来的log为:%v,接收到的log为:%v\n", rf.me, rf.log, args.Entries)
+	//fmt.Printf("%v原来的log为:%v,接收到的log为:%v\n", rf.me, rf.log, args.Entries)
 
 	//二分失败，返回失败响应
 	if len(rf.log) < args.PrevLogIndex+1 || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
@@ -304,9 +336,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.log = append(rf.log, args.Entries...)
 		reply.NextIndex = len(rf.log)
 
+		rf.persist()
+
 		if args.LeaderCommit > rf.commitIndex {
 			rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
-			// fmt.Printf("%v收到%v的logrepli,commitindex更新为%v\n", rf.me, args.LeaderId, rf.commitIndex)
+			// //fmt.Printf("%v收到%v的logrepli,commitindex更新为%v\n", rf.me, args.LeaderId, rf.commitIndex)
 			go func() {
 				rf.commitCond.Broadcast()
 			}()
@@ -314,7 +348,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	}
 
-	// fmt.Printf("%v 的 log 变为: %v\n", rf.me, rf.log)
+	//fmt.Printf("%v 的 log 变为: %v\n", rf.me, rf.log)
 
 }
 
@@ -346,7 +380,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	// fmt.Printf("%v发送requesetvoterpc到%v\n", rf.me, server)
+	// //fmt.Printf("%v发送requesetvoterpc到%v\n", rf.me, server)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
@@ -384,11 +418,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 
 	if rf.IsLeader {
-		// fmt.Printf("---------------------------------------%v接收到命令%v\n", rf.me, command)
+		//fmt.Printf("---------------------------------------%v接收到命令%v\n", rf.me, command)
 		log := LogEntry{Command: command, Term: rf.currentTerm}
 		rf.log = append(rf.log, log)
 		index = len(rf.log) - 1
 		term = rf.currentTerm
+
+		rf.persist()
+
 		isLeader = true
 
 		rf.nextIndex[rf.me] = index + 1
@@ -439,8 +476,8 @@ func (rf *Raft) FillAppendEntriesArgs(u int, args *AppendEntriesArgs) {
 		args.Entries = nil
 	}
 
-	// fmt.Printf("%v 发给 %v 的 rpc内容为：Find:%v, leadercommit:%v leader_id: %v prevlogindex:%v prevlogterm:%v term:%v logs:%v\n ",
-	// rf.me, u, args.FindPrevIndex, args.LeaderCommit, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, args.Term, args.Entries)
+	//fmt.Printf("%v 发给 %v 的 rpc内容为：leadercommit:%v leader_id: %v prevlogindex:%v prevlogterm:%v term:%v logs:%v\n ",
+	// rf.me, u, args.LeaderCommit, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, args.Term, args.Entries)
 
 	rf.mu.Unlock()
 }
@@ -474,7 +511,7 @@ func (rf *Raft) SingleReplcate() {
 					return
 				}
 
-				// fmt.Printf("leader:%v，%v的回复的内容为:term : %v success:%v nextindex:%v\n", rf.me, u, reply.Term, reply.Success, reply.NextIndex)
+				//fmt.Printf("leader:%v，%v的回复的内容为:term : %v success:%v nextindex:%v\n", rf.me, u, reply.Term, reply.Success, reply.NextIndex)
 				rf.mu.Lock()
 				if reply.Success {
 					rf.matchIndex[u] = reply.NextIndex - 1
@@ -482,18 +519,21 @@ func (rf *Raft) SingleReplcate() {
 					//若添加成功，说明已经处理完冲突了
 					rf.hasfixconflict[u] = true
 
-					// fmt.Printf("leader %v 收到了 %v 的成功回复，对应的next变为 %v,match变为 %v,left变为%v,right变为%v\n", rf.me, u, rf.nextIndex[u], rf.matchIndex[u], rf.sectionForPrevIndex[u][0], rf.sectionForPrevIndex[u][1])
+					//fmt.Printf("leader %v 收到了 %v 的成功回复，对应的next变为 %v,match变为 %v\n", rf.me, u, rf.nextIndex[u], rf.matchIndex[u])
 					//TODO更新索引
 					rf.updateCommitIndex()
 				} else {
-					// fmt.Printf("leader %v 收到了 %v 的失败回复\n", rf.me, u)
+					//fmt.Printf("leader %v 收到了 %v 的失败回复\n", rf.me, u)
 					if reply.Term > args.Term {
-						// fmt.Printf("follower %v 的term %v 比自己leader %v 的term %v大，更新并放弃leader\n", u, reply.Term, rf.me, rf.currentTerm)
+						//fmt.Printf("follower %v 的term %v 比自己leader %v 的term %v大，更新并放弃leader\n", u, reply.Term, rf.me, rf.currentTerm)
 						rf.currentTerm = reply.Term
 						rf.votedFor = -1
 						if rf.IsLeader {
 							rf.IsLeader = false
 						}
+
+						rf.persist()
+
 						rf.mu.Unlock()
 						rf.resetTimer <- struct{}{}
 						return
@@ -505,13 +545,16 @@ func (rf *Raft) SingleReplcate() {
 					//被覆盖后,follower已经提交的部分不变
 					rf.nextIndex[u] = rf.nextIndex[u] / 2
 
+					//fmt.Printf("leader %v 对应的 follower %v 的nextindex二分更新为 %v\n", rf.me, u, rf.nextIndex)
+
 					if rf.nextIndex[u] > reply.NextIndex {
 						rf.nextIndex[u] = reply.NextIndex
+						//fmt.Printf("follower日志较短，leader %v 对应的 follower %v 的nextindex二分更新为 %v\n", rf.me, u, rf.nextIndex)
 					}
 
 				}
 				rf.nextIndex[u] = min(max(rf.nextIndex[u], 1), len(rf.log))
-				// fmt.Printf("leader 为 %v，%v最终的next变为 %v,match变为 %v\n", rf.me, u, rf.nextIndex[u], rf.matchIndex[u])
+				//fmt.Printf("leader 为 %v，%v最终的next变为 %v,match变为 %v\n", rf.me, u, rf.nextIndex[u], rf.matchIndex[u])
 				// }
 				rf.mu.Unlock()
 
@@ -521,13 +564,13 @@ func (rf *Raft) SingleReplcate() {
 	}
 
 	wg.Wait()
-	// fmt.Printf("leader %v (是否为leader: %v)wait结束\n", rf.me, rf.IsLeader)
+	// //fmt.Printf("leader %v (是否为leader: %v)wait结束\n", rf.me, rf.IsLeader)
 }
 
 func (rf *Raft) LogReplication() {
 	for {
 		if _, isLeader := rf.GetState(); isLeader {
-			// fmt.Printf("%v发起心跳，term为%v\n", rf.me, rf.currentTerm)
+			//fmt.Printf("%v发起心跳，term为%v\n", rf.me, rf.currentTerm)
 
 			//重置leader时间，防止leader选举超时再次发起选举
 			rf.resetTimer <- struct{}{}
@@ -536,7 +579,7 @@ func (rf *Raft) LogReplication() {
 			//选举超时发起选举
 			go rf.SingleReplcate()
 		} else {
-			// fmt.Printf("leader %v (是否为leader: %v) 变回follower\n", rf.me, rf.IsLeader)
+			//fmt.Printf("leader %v (是否为leader: %v) 变回follower\n", rf.me, rf.IsLeader)
 			break
 		}
 		rf.resetTimer <- struct{}{}
@@ -545,13 +588,13 @@ func (rf *Raft) LogReplication() {
 }
 
 func (rf *Raft) updateCommitIndex() {
-	// fmt.Printf("%v进入updatecommitindex\n", rf.me)
+	//fmt.Printf("%v进入updatecommitindex\n", rf.me)
 
 	//找到最大一个索引，这个索引之前的部分（包括这个索引）被超过半数复制，且当前项的term等于currentterm
 	//这里可以考虑二分来找，有二段性
 	for n := len(rf.log) - 1; n > rf.commitIndex; n-- {
 		if rf.log[n].Term != rf.currentTerm {
-			// fmt.Printf("update失败\n")
+			//fmt.Printf("update失败\n")
 			break
 		}
 
@@ -561,14 +604,14 @@ func (rf *Raft) updateCommitIndex() {
 				cnt++
 				if cnt > len(rf.peers)/2 {
 					rf.commitIndex = n
-					// fmt.Printf("%v的commitindex更新为:%v\n", rf.me, rf.commitIndex)
+					//fmt.Printf("%v的commitindex更新为:%v\n", rf.me, rf.commitIndex)
 					rf.commitCond.Broadcast()
 					return
 				}
 			}
 		}
 
-		// fmt.Printf("对于index %v 已经有 %v 个follower 复制到了\n", n, cnt)
+		//fmt.Printf("对于index %v 已经有 %v 个follower 复制到了\n", n, cnt)
 	}
 }
 
@@ -578,6 +621,8 @@ func (rf *Raft) FillRequestArgs(args *RequestVoteArgs) {
 
 	rf.currentTerm += 1
 	rf.votedFor = rf.me
+
+	rf.persist()
 
 	args.CandidateId = rf.me
 	args.LastLogIndex = len(rf.log) - 1
@@ -590,7 +635,7 @@ func (rf *Raft) Election() {
 		return
 	}
 
-	// fmt.Printf("%v（是否为leader :%v ）发起选举\n", rf.me, rf.IsLeader)
+	//fmt.Printf("%v（是否为leader :%v ）发起选举\n", rf.me, rf.IsLeader)
 	//填充参数
 	args := RequestVoteArgs{}
 	rf.FillRequestArgs(&args)
@@ -620,7 +665,7 @@ func (rf *Raft) Election() {
 		}
 	}
 
-	// fmt.Printf("%v已收集完选票\n", rf.me)
+	//fmt.Printf("%v已收集完选票\n", rf.me)
 
 	go func() {
 		wg.Wait()
@@ -635,7 +680,7 @@ func (rf *Raft) Election() {
 			if votes > len(rf.peers)/2 {
 				//只发起一次心跳
 				if !has_been_leader {
-					// fmt.Printf("%v当选leader，收到选票数为%v\n", rf.me, votes)
+					//fmt.Printf("%v当选leader，收到选票数为%v\n", rf.me, votes)
 					rf.mu.Lock()
 					rf.IsLeader = true
 					has_been_leader = true
@@ -650,11 +695,14 @@ func (rf *Raft) Election() {
 			}
 			//若cand任期小，强制变回follower
 		} else if reply.Term > rf.currentTerm {
-			// fmt.Printf("%v的任期号小，为%v，收到follower的任期号为%v，变回follower\n", rf.me, rf.currentTerm, reply.Term)
+			//fmt.Printf("%v的任期号小，为%v，收到follower的任期号为%v，变回follower\n", rf.me, rf.currentTerm, reply.Term)
 			rf.mu.Lock()
 			rf.currentTerm = reply.Term
 			rf.IsLeader = false
 			rf.votedFor = -1
+
+			rf.persist()
+
 			rf.mu.Unlock()
 			rf.resetTimer <- struct{}{}
 			return
@@ -662,7 +710,7 @@ func (rf *Raft) Election() {
 	}
 
 	if !has_been_leader {
-		// fmt.Printf("%v收到的选票不够，当选失败\n", rf.me)
+		//fmt.Printf("%v收到的选票不够，当选失败\n", rf.me)
 		rf.IsLeader = false
 	}
 
@@ -692,7 +740,7 @@ func (rf *Raft) ticker() {
 		select {
 		//检查是否有重置超时
 		case <-rf.resetTimer:
-			// fmt.Println(rf.me, "重置时间")
+			// //fmt.Println(rf.me, "重置时间")
 			if !rf.electionTimer.Stop() {
 				<-rf.electionTimer.C
 			}
@@ -701,7 +749,7 @@ func (rf *Raft) ticker() {
 			//检查是否选举超时
 		case <-rf.electionTimer.C:
 			//发起选举
-			// fmt.Println(rf.me, "发起选举")
+			// //fmt.Println(rf.me, "发起选举")
 			go rf.Election()
 
 			rf.electionTimer.Reset(time.Duration(400+(rand.Int63()%400)) * time.Millisecond)
@@ -737,7 +785,7 @@ func (rf *Raft) applyEntry() {
 
 		rf.mu.Unlock()
 
-		// fmt.Printf("%v提交的log为:%v\n", rf.me, logs)
+		//fmt.Printf("%v提交的log为:%v\n", rf.me, logs)
 
 		for i := 0; i < cur-last; i++ {
 			reply := ApplyMsg{
@@ -745,7 +793,7 @@ func (rf *Raft) applyEntry() {
 				Command:      logs[i].Command,
 				CommandValid: true,
 			}
-			// fmt.Printf("%v将%v塞到apply中\n", rf.me, reply)
+			//fmt.Printf("%v将%v塞到apply中\n", rf.me, reply)
 			rf.applyChan <- reply
 		}
 	}
@@ -779,7 +827,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.log[0].Term = 0
 	rf.log[0].Command = nil
 
-	// fmt.Println(len(rf.log))
+	// //fmt.Println(len(rf.log))
 
 	rf.nextIndex = make([]int, len(peers))
 	for i := 0; i < len(peers); i++ {
@@ -801,9 +849,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.commitCond = sync.NewCond(&rf.mu)
 
+	//fmt.Printf("%v 初始化的原本logs为: %v\n", rf.me, rf.log)
+
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-	// fmt.Println("id: ", rf.me, " logs长度: ", len(rf.log))
+
+	//fmt.Printf("%v 读磁盘后的logs为: %v\n", rf.me, rf.log)
+
+	// //fmt.Println("id: ", rf.me, " logs长度: ", len(rf.log))
 	// start ticker goroutine to start elections
 	go rf.ticker()
 
