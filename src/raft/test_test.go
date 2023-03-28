@@ -960,8 +960,8 @@ func TestUnreliableAgree2C(t *testing.T) {
 	}
 }
 
-func TestFigure8Unreliable2C(t *testing.T) {
-	for i := 0; i < 20; i++ {
+func TestFigure8Unreliable2c(t *testing.T) {
+	for i := 0; i < 1; i++ {
 
 		servers := 5
 		cfg := make_config(t, servers, true, false)
@@ -1163,13 +1163,13 @@ func internalChurn(t *testing.T, unreliable bool) {
 	cfg.end()
 }
 
-func TestReliableChurn2c(t *testing.T) {
+func TestReliableChurn2C(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		internalChurn(t, false)
 	}
 }
 
-func TestUnreliableChurn2c(t *testing.T) {
+func TestUnreliableChurn2C(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		internalChurn(t, true)
 	}

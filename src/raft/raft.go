@@ -21,6 +21,7 @@ import (
 	//	"bytes"
 
 	"bytes"
+	"fmt"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -77,7 +78,11 @@ type Raft struct {
 	commitIndex int
 	lastApplied int
 
-	nextIndex  []int
+	nextIndex []int
+
+	//存取每个u对应的prevlogindex的区间
+	sectionForPrevIndex [][]int
+
 	matchIndex []int
 
 	resetTimer    chan struct{}
@@ -120,7 +125,6 @@ func (rf *Raft) GetState() (int, bool) {
 
 	return term, isleader
 
-	// return term, isleader
 }
 
 // save Raft's persistent state to stable storage,
@@ -216,20 +220,21 @@ type RequestVoteReply struct {
 }
 
 type AppendEntriesArgs struct {
-	Term         int
-	LeaderId     int
-	PrevLogIndex int
-	PrevLogTerm  int
-	Entries      []LogEntry
-	LeaderCommit int
+	Term          int
+	LeaderId      int
+	PrevLogIndex  int
+	PrevLogTerm   int
+	Entries       []LogEntry
+	LeaderCommit  int
+	FindPrevIndex bool
 }
 
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
 
-	ConflictTerm int
-	FirstIndex   int
+	//成功添加log时，或者二分探测不匹配是由日志更短导致时，返回len(rf.log)
+	NextIndex int
 }
 
 // example RequestVote RPC handler.
@@ -280,7 +285,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	// fmt.Printf("%v(是否为leader:%v, term为%v)收到了来自%v的心跳(term为%v)\n", rf.me, rf.IsLeader, rf.currentTerm, args.LeaderId, args.Term)
+	fmt.Printf("%v(是否为leader:%v, term为%v)收到了来自%v的心跳(term为%v)\n", rf.me, rf.IsLeader, rf.currentTerm, args.LeaderId, args.Term)
 	select {
 	case <-rf.shutdown:
 		return
@@ -291,16 +296,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	defer rf.mu.Unlock()
 
 	if args.Term < rf.currentTerm {
-		// fmt.Printf("leader %v 的term %v 比自己 %v 的 term %v 小，拒绝\n", args.LeaderId, args.Term, rf.me, rf.currentTerm)
+		fmt.Printf("leader %v 的term %v 比自己 %v 的 term %v 小，拒绝\n", args.LeaderId, args.Term, rf.me, rf.currentTerm)
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
 	}
 
 	if rf.IsLeader {
-		// fmt.Printf("%v的isleader变为false\n", rf.me)
+		fmt.Printf("%v的isleader变为false\n", rf.me)
 		rf.IsLeader = false
-
 	}
 
 	if rf.votedFor != args.LeaderId {
@@ -308,61 +312,47 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	if rf.currentTerm < args.Term {
-		// fmt.Printf("%v收到了leader %v的心跳，将term %v 同步为 %v\n", rf.me, args.LeaderId, rf.currentTerm, args.Term)
+		fmt.Printf("%v收到了leader %v的心跳，将term %v 同步为 %v\n", rf.me, args.LeaderId, rf.currentTerm, args.Term)
 		rf.currentTerm = args.Term
 	}
 
 	rf.resetTimer <- struct{}{}
 
-	preLogIdx, preLogTerm := 0, 0
+	fmt.Printf("%v原来的log为:%v,接收到的log为:%v\n", rf.me, rf.log, args.Entries)
 
-	if len(rf.log) > args.PrevLogIndex {
-		preLogIdx = args.PrevLogIndex
-		preLogTerm = rf.log[preLogIdx].Term
-	}
-
-	// fmt.Printf("%v原来的log为:%v,接收到的log为:%v\n", rf.me, rf.log, args.Entries)
-	if preLogIdx == args.PrevLogIndex && preLogTerm == args.PrevLogTerm {
-		reply.Success = true
-		rf.log = rf.log[:preLogIdx+1]
-		rf.log = append(rf.log, args.Entries...)
-
-		rf.persist()
-
-		var last = len(rf.log) - 1
-
-		if args.LeaderCommit > rf.commitIndex {
-			rf.commitIndex = min(args.LeaderCommit, last)
-			// fmt.Printf("%v收到%v的logrepli,commitindex更新为%v\n", rf.me, args.LeaderId, rf.commitIndex)
-			go func() {
-				rf.commitCond.Broadcast()
-			}()
+	//二分失败，返回失败响应
+	if len(rf.log) < args.PrevLogIndex+1 || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		reply.Success = false
+		reply.NextIndex = 0
+		//如果是由于日志长度较短导致的，返回日志长度，方便右端点更新
+		if len(rf.log) < args.PrevLogIndex+1 {
+			reply.NextIndex = len(rf.log)
 		}
 
-		reply.ConflictTerm = rf.log[last].Term
-		reply.FirstIndex = last
 	} else {
-		reply.Success = false
+		reply.Success = true
 
-		var first = 1
-		reply.ConflictTerm = preLogTerm
+		//非二分探测报文的话，成功后添加日志，若为二分探测报文，则直接返回成功响应
+		if !args.FindPrevIndex {
+			rf.log = rf.log[:args.PrevLogIndex+1]
+			rf.log = append(rf.log, args.Entries...)
 
-		if reply.ConflictTerm == 0 {
-			first = len(rf.log)
-			reply.ConflictTerm = rf.log[first-1].Term
-		} else {
-			for i := preLogIdx - 1; i > 0; i-- {
-				if rf.log[i].Term != preLogTerm {
-					first = i + 1
-					break
-				}
+			rf.persist()
+
+			reply.NextIndex = len(rf.log)
+
+			if args.LeaderCommit > rf.commitIndex {
+				rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
+				fmt.Printf("%v收到%v的logrepli,commitindex更新为%v\n", rf.me, args.LeaderId, rf.commitIndex)
+				go func() {
+					rf.commitCond.Broadcast()
+				}()
 			}
 		}
-
-		reply.FirstIndex = first
 	}
 
-	// fmt.Printf("%v的log变为:%v\n", rf.me, rf.log)
+	fmt.Printf("%v 的 log 变为: %v\n", rf.me, rf.log)
+
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -431,7 +421,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.mu.Lock()
 
 	if rf.IsLeader {
-		// fmt.Printf("---------------------------------------%v接收到命令%v\n", rf.me, command)
+		fmt.Printf("---------------------------------------%v接收到命令%v\n", rf.me, command)
 		log := LogEntry{Command: command, Term: rf.currentTerm}
 		rf.log = append(rf.log, log)
 		index = len(rf.log) - 1
@@ -444,9 +434,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.matchIndex[rf.me] = index
 
 		rf.mu.Unlock()
-		// go rf.SingleReplcate()
 
-		// rf.wakeupConsistencyCheck()
 	} else {
 		rf.mu.Unlock()
 	}
@@ -478,18 +466,31 @@ func (rf *Raft) FillAppendEntriesArgs(u int, args *AppendEntriesArgs) {
 
 	args.LeaderCommit = rf.commitIndex
 	args.LeaderId = rf.me
-	args.PrevLogIndex = rf.nextIndex[u] - 1
-	args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
 	args.Term = rf.currentTerm
 
-	if rf.nextIndex[u] < len(rf.log) {
+	left := rf.sectionForPrevIndex[u][0]
+	right := rf.sectionForPrevIndex[u][1]
+
+	//对于每个leader来说，如果left=right，说明已经找到分界点，冲突处理完成，后面只需直接添加或者覆盖follower后面的日志即可
+	if left == right {
+		args.PrevLogIndex = rf.nextIndex[u] - 1
+		args.FindPrevIndex = false
+	} else {
+		//发送二分探测报文
+		args.PrevLogIndex = (left + right + 1) / 2
+		args.FindPrevIndex = true
+	}
+	args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+
+	if rf.nextIndex[u] < len(rf.log) && left == right {
 		args.Entries = append(args.Entries, rf.log[rf.nextIndex[u]:]...)
 	} else {
+		//二分探测报文或者没有数据发时发nil即可，减少通信字节数
 		args.Entries = nil
 	}
 
-	// fmt.Printf("%v 发给 %v 的 rpc内容为：leadercommit:%v leader_id: %v prevlogindex:%v prevlogterm:%v term:%v logs:%v\n ",
-	// rf.me, u, args.LeaderCommit, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, args.Term, args.Entries)
+	fmt.Printf("%v 发给 %v 的 rpc内容为：Find:%v, leadercommit:%v leader_id: %v prevlogindex:%v prevlogterm:%v term:%v logs:%v\n ",
+		rf.me, u, args.FindPrevIndex, args.LeaderCommit, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, args.Term, args.Entries)
 
 	rf.mu.Unlock()
 }
@@ -507,6 +508,12 @@ func (rf *Raft) SingleReplcate() {
 
 				rf.FillAppendEntriesArgs(u, &args)
 
+				//若该leader为非法leader，会收到其它协程follower的失败回复，并更新自己的term
+				//在下面更新自己term时会拿到锁，导致当前协程的fillargs被阻塞，当改完自己的term，
+				//后，才会放开锁执行fillargs，但此时term已经不是原来的term了，也就是会拿着修改后的
+				//的term带着旧日志发过去，由于此时term是最新的，follower会误以为当前心跳合法，然后用
+				//非法的旧日志去更新已经提交的日志。若原本有leader的话，该leader收到该心跳后，还会变回
+				//follower。所以在send之前要及时判断，若term已经修改过，isleader变为false，则停止发送
 				if _, isleader := rf.GetState(); !isleader {
 					return
 				}
@@ -517,23 +524,25 @@ func (rf *Raft) SingleReplcate() {
 					return
 				}
 
-				// fmt.Printf("leader:%v，%v的回复的内容为:term : %v success:%v confi:%v first:%v\n", rf.me, u, reply.Term, reply.Success, reply.ConflictTerm, reply.FirstIndex)
+				fmt.Printf("leader:%v，%v的回复的内容为:term : %v success:%v nextindex:%v\n", rf.me, u, reply.Term, reply.Success, reply.NextIndex)
 				rf.mu.Lock()
-				if reply.Success {
-					rf.matchIndex[u] = reply.FirstIndex
+				if reply.Success && !args.FindPrevIndex {
+					rf.matchIndex[u] = reply.NextIndex - 1
 					rf.nextIndex[u] = rf.matchIndex[u] + 1
-					// fmt.Printf("leader %v 收到了 %v 的成功回复，对应的next变为 %v,match变为 %v\n", rf.me, u, rf.nextIndex[u], rf.matchIndex[u])
+
+					fmt.Printf("leader %v 收到了 %v 的成功回复，对应的next变为 %v,match变为 %v,left变为%v,right变为%v\n", rf.me, u, rf.nextIndex[u], rf.matchIndex[u], rf.sectionForPrevIndex[u][0], rf.sectionForPrevIndex[u][1])
 					//TODO更新索引
 					rf.updateCommitIndex()
 				} else {
+					fmt.Printf("leader %v 收到了 %v 的失败回复\n", rf.me, u)
 					if reply.Term > args.Term {
+						fmt.Printf("follower %v 的term %v 比自己leader %v 的term %v大，更新并放弃leader\n", u, reply.Term, rf.me, rf.currentTerm)
 						rf.currentTerm = reply.Term
 						rf.votedFor = -1
 						if rf.IsLeader {
 							rf.IsLeader = false
-							// rf.checkleader.Broadcast()
-							// rf.wakeupConsistencyCheck()
 						}
+
 						rf.persist()
 
 						rf.mu.Unlock()
@@ -542,32 +551,36 @@ func (rf *Raft) SingleReplcate() {
 
 					}
 
-					var know, lastIndex = false, 0
-					if reply.ConflictTerm != 0 {
-						for i := len(rf.log) - 1; i > 0; i-- {
-							if rf.log[i].Term == reply.ConflictTerm {
-								know = true
-								lastIndex = i
-								break
-							}
-						}
+					//收到二分回应，更新[lmr]
+					//if(匹配) l=mid
+					//else r=mid-1
+					left := rf.sectionForPrevIndex[u][0]
+					right := rf.sectionForPrevIndex[u][1]
+					mid := (left + right + 1) / 2
+					fmt.Printf("leader %v 对应 follower %v 的原区间为 [%v,%v]，中点为 %v\n", rf.me, u, left, right, mid)
 
-						if know {
-							if lastIndex > reply.FirstIndex {
-								lastIndex = reply.FirstIndex
-							}
-							rf.nextIndex[u] = lastIndex
-						} else {
-							rf.nextIndex[u] = reply.FirstIndex
-						}
-
+					if reply.Success {
+						fmt.Printf("leader %v 对应 follower %v 响应成功，将左区间更新为 %v\n", rf.me, u, mid)
+						rf.sectionForPrevIndex[u][0] = mid
 					} else {
-						rf.nextIndex[u] = reply.FirstIndex
+						fmt.Printf("leader %v 对应 follower %v 响应失败，将右区间更新为 %v\n", rf.me, u, mid-1)
+						rf.sectionForPrevIndex[u][1] = mid - 1
+						if reply.NextIndex != 0 {
+							rf.sectionForPrevIndex[u][1] = min(rf.sectionForPrevIndex[u][1], reply.NextIndex-1)
+						}
 					}
-					// fmt.Printf("leader 为 %v，%v此时的next变为 %v,match变为 %v\n", rf.me, u, rf.nextIndex[u], rf.matchIndex[u])
+
+					fmt.Printf("leader %v 对应 follower %v 的最后区间变为[%v,%v]\n", rf.me, u, rf.sectionForPrevIndex[u][0], rf.sectionForPrevIndex[u][1])
+
+					//如果l==r，此时找到分界点
+					if rf.sectionForPrevIndex[u][0] == rf.sectionForPrevIndex[u][1] {
+						rf.nextIndex[u] = rf.sectionForPrevIndex[u][0] + 1
+						fmt.Printf("leader %v 对应 follower %v 找到分界点 %v ，将nextindex更新为 %v\n", rf.me, u, rf.sectionForPrevIndex[u][0], rf.nextIndex[u])
+					}
+
 				}
 				rf.nextIndex[u] = min(max(rf.nextIndex[u], 1), len(rf.log))
-				// fmt.Printf("leader 为 %v，%v最终的next变为 %v,match变为 %v\n", rf.me, u, rf.nextIndex[u], rf.matchIndex[u])
+				fmt.Printf("leader 为 %v，%v最终的next变为 %v,match变为 %v\n", rf.me, u, rf.nextIndex[u], rf.matchIndex[u])
 				// }
 				rf.mu.Unlock()
 
@@ -578,18 +591,21 @@ func (rf *Raft) SingleReplcate() {
 
 	wg.Wait()
 	// fmt.Printf("leader %v (是否为leader: %v)wait结束\n", rf.me, rf.IsLeader)
-
 }
 
 func (rf *Raft) LogReplication() {
 	for {
 		if _, isLeader := rf.GetState(); isLeader {
-			// fmt.Printf("%v发起心跳，term为%v\n", rf.me, rf.currentTerm)
+			fmt.Printf("%v发起心跳，term为%v\n", rf.me, rf.currentTerm)
+
+			//重置leader时间，防止leader选举超时再次发起选举
 			rf.resetTimer <- struct{}{}
 
+			//这里一定要开协程，否则每次wait之前还要等该轮响应处理完，耗时长，导致心跳间隔变大，使follower容易
+			//选举超时发起选举
 			go rf.SingleReplcate()
 		} else {
-			// fmt.Printf("leader %v (是否为leader: %v) 变回follower\n", rf.me, rf.IsLeader)
+			fmt.Printf("leader %v (是否为leader: %v) 变回follower\n", rf.me, rf.IsLeader)
 			break
 		}
 		rf.resetTimer <- struct{}{}
@@ -598,10 +614,13 @@ func (rf *Raft) LogReplication() {
 }
 
 func (rf *Raft) updateCommitIndex() {
-	// fmt.Printf("%v进入updatecommitindex\n", rf.me)
+	fmt.Printf("%v进入updatecommitindex\n", rf.me)
+
+	//找到最大一个索引，这个索引之前的部分（包括这个索引）被超过半数复制，且当前项的term等于currentterm
+	//这里可以考虑二分来找，有二段性
 	for n := len(rf.log) - 1; n > rf.commitIndex; n-- {
 		if rf.log[n].Term != rf.currentTerm {
-			// fmt.Printf("update失败\n")
+			fmt.Printf("update失败\n")
 			break
 		}
 
@@ -611,14 +630,14 @@ func (rf *Raft) updateCommitIndex() {
 				cnt++
 				if cnt > len(rf.peers)/2 {
 					rf.commitIndex = n
-					// fmt.Printf("%v的commitindex更新为:%v\n", rf.me, rf.commitIndex)
+					fmt.Printf("%v的commitindex更新为:%v\n", rf.me, rf.commitIndex)
 					rf.commitCond.Broadcast()
 					return
 				}
 			}
 		}
 
-		// fmt.Printf("对于index %v 已经有 %v 个follower 复制到了\n", n, cnt)
+		fmt.Printf("对于index %v 已经有 %v 个follower 复制到了\n", n, cnt)
 	}
 }
 
@@ -642,7 +661,7 @@ func (rf *Raft) Election() {
 		return
 	}
 
-	// fmt.Printf("%v（是否为leader :%v ）发起选举\n", rf.me, rf.IsLeader)
+	fmt.Printf("%v（是否为leader :%v ）发起选举\n", rf.me, rf.IsLeader)
 	//填充参数
 	args := RequestVoteArgs{}
 	rf.FillRequestArgs(&args)
@@ -672,7 +691,7 @@ func (rf *Raft) Election() {
 		}
 	}
 
-	// fmt.Printf("%v已收集完选票\n", rf.me)
+	fmt.Printf("%v已收集完选票\n", rf.me)
 
 	go func() {
 		wg.Wait()
@@ -687,7 +706,7 @@ func (rf *Raft) Election() {
 			if votes > len(rf.peers)/2 {
 				//只发起一次心跳
 				if !has_been_leader {
-					// fmt.Printf("%v当选leader，收到选票数为%v\n", rf.me, votes)
+					fmt.Printf("%v当选leader，收到选票数为%v\n", rf.me, votes)
 					rf.mu.Lock()
 					rf.IsLeader = true
 					has_been_leader = true
@@ -702,7 +721,7 @@ func (rf *Raft) Election() {
 			}
 			//若cand任期小，强制变回follower
 		} else if reply.Term > rf.currentTerm {
-			// fmt.Printf("%v的任期号小，为%v，收到follower的任期号为%v，变回follower\n", rf.me, rf.currentTerm, reply.Term)
+			fmt.Printf("%v的任期号小，为%v，收到follower的任期号为%v，变回follower\n", rf.me, rf.currentTerm, reply.Term)
 			rf.mu.Lock()
 			rf.currentTerm = reply.Term
 			rf.IsLeader = false
@@ -715,7 +734,7 @@ func (rf *Raft) Election() {
 	}
 
 	if !has_been_leader {
-		// fmt.Printf("%v收到的选票不够，当选失败\n", rf.me)
+		fmt.Printf("%v收到的选票不够，当选失败\n", rf.me)
 		rf.IsLeader = false
 	}
 
@@ -726,10 +745,13 @@ func (rf *Raft) resetOnElection() {
 	defer rf.mu.Unlock()
 
 	for i := 0; i < len(rf.peers); i++ {
+		rf.sectionForPrevIndex[i][0] = 0
+		rf.sectionForPrevIndex[i][1] = len(rf.log) - 1
 		rf.nextIndex[i] = len(rf.log)
 		rf.matchIndex[i] = 0
 		if i == rf.me {
 			rf.matchIndex[i] = len(rf.log) - 1
+			rf.sectionForPrevIndex[i][0] = len(rf.log) - 1
 		}
 	}
 }
@@ -738,12 +760,6 @@ func (rf *Raft) ticker() {
 	for !rf.killed() {
 		// Your code here (2A)
 		// Check if a leader election should be started.
-
-		// rf.mu.Lock()
-		// for rf.IsLeader {
-		// 	rf.checkleader.Wait()
-		// }
-		// rf.mu.Unlock()
 
 		select {
 		//检查是否有重置超时
@@ -791,13 +807,9 @@ func (rf *Raft) applyEntry() {
 			copy(logs, rf.log[last+1:cur+1])
 		}
 
-		// if rf.IsLeader {
-		// 	go rf.SingleReplcate()
-		// }
-
 		rf.mu.Unlock()
 
-		// fmt.Printf("%v提交的log为:%v\n", rf.me, logs)
+		fmt.Printf("%v提交的log为:%v\n", rf.me, logs)
 
 		for i := 0; i < cur-last; i++ {
 			reply := ApplyMsg{
@@ -805,7 +817,7 @@ func (rf *Raft) applyEntry() {
 				Command:      logs[i].Command,
 				CommandValid: true,
 			}
-			// fmt.Printf("%v将%v塞到apply中\n", rf.me, reply)
+			fmt.Printf("%v将%v塞到apply中\n", rf.me, reply)
 			rf.applyChan <- reply
 		}
 	}
@@ -844,6 +856,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nextIndex = make([]int, len(peers))
 	for i := 0; i < len(peers); i++ {
 		rf.nextIndex[i] = len(rf.log)
+	}
+
+	rf.sectionForPrevIndex = make([][]int, len(peers))
+	for i := 0; i < len(peers); i++ {
+		rf.sectionForPrevIndex[i] = append(rf.sectionForPrevIndex[i], len(rf.log)-1)
+		rf.sectionForPrevIndex[i] = append(rf.sectionForPrevIndex[i], len(rf.log)-1)
 	}
 
 	rf.matchIndex = make([]int, len(peers))
