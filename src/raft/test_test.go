@@ -929,7 +929,7 @@ func TestFigure82C(t *testing.T) {
 	}
 }
 
-func TestUnreliableAgree2c(t *testing.T) {
+func TestUnreliableAgree2C(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		servers := 5
 		cfg := make_config(t, servers, true, false)
@@ -960,7 +960,7 @@ func TestUnreliableAgree2c(t *testing.T) {
 	}
 }
 
-func TestFigure8Unreliable2c(t *testing.T) {
+func TestFigure8Unreliable2C(t *testing.T) {
 	for i := 0; i < 20; i++ {
 
 		servers := 5
