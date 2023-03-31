@@ -111,6 +111,7 @@ func make_config(t *testing.T, n int, unreliable bool, snapshot bool) *config {
 
 // shut down a Raft server but save its persistent state.
 func (cfg *config) crash1(i int) {
+	// fmt.Printf("----------------------------------%v发生了crash-------------------------------------------\n", i)
 	cfg.disconnect(i)
 	cfg.net.DeleteServer(i) // disable client connections to the server.
 
@@ -275,6 +276,7 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 // state persister, to isolate previous instance of
 // this server. since we cannot really kill it.
 func (cfg *config) start1(i int, applier func(int, chan ApplyMsg)) {
+	// fmt.Printf("----------------------------------%v发生了重启-------------------------------------------\n", i)
 	cfg.crash1(i)
 
 	// a fresh set of outgoing ClientEnd names.

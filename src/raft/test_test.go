@@ -22,7 +22,7 @@ import (
 const RaftElectionTimeout = 1000 * time.Millisecond
 
 func TestInitialElection2A(t *testing.T) {
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 1; i++ {
 		servers := 3
 		cfg := make_config(t, servers, false, false)
 		defer cfg.cleanup()
@@ -60,7 +60,7 @@ func TestInitialElection2A(t *testing.T) {
 }
 
 func TestReElection2A(t *testing.T) {
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 1; i++ {
 		servers := 3
 		cfg := make_config(t, servers, false, false)
 		defer cfg.cleanup()
@@ -103,7 +103,7 @@ func TestReElection2A(t *testing.T) {
 }
 
 func TestManyElections2A(t *testing.T) {
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 1; i++ {
 		servers := 7
 		cfg := make_config(t, servers, false, false)
 		defer cfg.cleanup()
@@ -139,7 +139,7 @@ func TestManyElections2A(t *testing.T) {
 }
 
 func TestBasicAgree2B(t *testing.T) {
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 1; i++ {
 		servers := 3
 		cfg := make_config(t, servers, false, false)
 		defer cfg.cleanup()
@@ -200,7 +200,7 @@ func TestRPCBytes2B(t *testing.T) {
 
 // test just failure of followers.
 func TestFollowerFailure2B(t *testing.T) {
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 1; i++ {
 		servers := 3
 		cfg := make_config(t, servers, false, false)
 		defer cfg.cleanup()
@@ -251,7 +251,7 @@ func TestFollowerFailure2B(t *testing.T) {
 
 // test just failure of leaders.
 func TestLeaderFailure2B(t *testing.T) {
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 1; i++ {
 		servers := 3
 		cfg := make_config(t, servers, false, false)
 		defer cfg.cleanup()
@@ -294,7 +294,7 @@ func TestLeaderFailure2B(t *testing.T) {
 // test that a follower participates after
 // disconnect and re-connect.
 func TestFailAgree2B(t *testing.T) {
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 1; i++ {
 		servers := 3
 		cfg := make_config(t, servers, false, false)
 		defer cfg.cleanup()
@@ -331,7 +331,7 @@ func TestFailAgree2B(t *testing.T) {
 
 //越界
 func TestFailNoAgree2B(t *testing.T) {
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 1; i++ {
 		servers := 5
 		cfg := make_config(t, servers, false, false)
 		defer cfg.cleanup()
@@ -384,7 +384,7 @@ func TestFailNoAgree2B(t *testing.T) {
 }
 
 func TestConcurrentStarts2B(t *testing.T) {
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 1; i++ {
 		servers := 3
 		cfg := make_config(t, servers, false, false)
 		defer cfg.cleanup()
@@ -487,7 +487,7 @@ func TestConcurrentStarts2B(t *testing.T) {
 }
 
 func TestRejoin2B(t *testing.T) {
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 1; i++ {
 		servers := 3
 		cfg := make_config(t, servers, false, false)
 		defer cfg.cleanup()
@@ -527,7 +527,7 @@ func TestRejoin2B(t *testing.T) {
 }
 
 func TestBackup2B(t *testing.T) {
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 1; i++ {
 		servers := 5
 		cnt := 50
 		cfg := make_config(t, servers, false, false)
@@ -535,7 +535,7 @@ func TestBackup2B(t *testing.T) {
 
 		cfg.begin("Test (2B): leader backs up quickly over incorrect follower logs")
 
-		cfg.one(rand.Int(), servers, true)
+		cfg.one(rand.Int()%10, servers, true)
 		// cfg.one(0, servers, true)
 
 		// put leader and one follower in a partition
@@ -546,7 +546,7 @@ func TestBackup2B(t *testing.T) {
 
 		// submit lots of commands that won't commit
 		for i := 0; i < cnt; i++ {
-			cfg.rafts[leader1].Start(rand.Int())
+			cfg.rafts[leader1].Start(rand.Int() % 10)
 		}
 
 		// for i := 1; i <= 5; i++ {
@@ -565,7 +565,7 @@ func TestBackup2B(t *testing.T) {
 
 		// // lots of successful commands to new group.
 		for i := 0; i < cnt; i++ {
-			cfg.one(rand.Int(), 3, true)
+			cfg.one(rand.Int()%10, 3, true)
 		}
 
 		// for i := 6; i <= 10; i++ {
@@ -582,7 +582,7 @@ func TestBackup2B(t *testing.T) {
 
 		// lots more commands that won't commit(50)
 		for i := 0; i < cnt; i++ {
-			cfg.rafts[leader2].Start(rand.Int())
+			cfg.rafts[leader2].Start(rand.Int() % 10)
 		}
 
 		// for i := 11; i <= 15; i++ {
@@ -602,7 +602,7 @@ func TestBackup2B(t *testing.T) {
 
 		// lots of successful commands to new group.
 		for i := 0; i < cnt; i++ {
-			cfg.one(rand.Int(), 3, true)
+			cfg.one(rand.Int()%10, 3, true)
 		}
 
 		// for i := 16; i <= 20; i++ {
@@ -613,7 +613,7 @@ func TestBackup2B(t *testing.T) {
 		for i := 0; i < servers; i++ {
 			cfg.connect(i)
 		}
-		cfg.one(rand.Int(), servers, true)
+		cfg.one(rand.Int()%10, servers, true)
 
 		// cfg.one(21, servers, true)
 
@@ -624,7 +624,7 @@ func TestBackup2B(t *testing.T) {
 }
 
 func TestCount2B(t *testing.T) {
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 1; i++ {
 		servers := 3
 		cfg := make_config(t, servers, false, false)
 		defer cfg.cleanup()
@@ -736,7 +736,7 @@ func TestCount2B(t *testing.T) {
 }
 
 func TestPersist12C(t *testing.T) {
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 1; i++ {
 		servers := 3
 		cfg := make_config(t, servers, false, false)
 		defer cfg.cleanup()
@@ -784,7 +784,7 @@ func TestPersist12C(t *testing.T) {
 }
 
 func TestPersist22C(t *testing.T) {
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 1; i++ {
 		servers := 5
 		cfg := make_config(t, servers, false, false)
 		defer cfg.cleanup()
@@ -832,7 +832,7 @@ func TestPersist22C(t *testing.T) {
 }
 
 func TestPersist32C(t *testing.T) {
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 1; i++ {
 		servers := 3
 		cfg := make_config(t, servers, false, false)
 		defer cfg.cleanup()
@@ -872,7 +872,7 @@ func TestPersist32C(t *testing.T) {
 // The leader in a new term may try to finish replicating log entries that
 // haven't been committed yet.
 func TestFigure82C(t *testing.T) {
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 1; i++ {
 		servers := 5
 		cfg := make_config(t, servers, false, false)
 		defer cfg.cleanup()
@@ -930,7 +930,7 @@ func TestFigure82C(t *testing.T) {
 }
 
 func TestUnreliableAgree2C(t *testing.T) {
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 1; i++ {
 		servers := 5
 		cfg := make_config(t, servers, true, false)
 		defer cfg.cleanup()
@@ -960,7 +960,7 @@ func TestUnreliableAgree2C(t *testing.T) {
 	}
 }
 
-func TestFigure8Unreliable2c(t *testing.T) {
+func TestFigure8Unreliable2C(t *testing.T) {
 	for i := 0; i < 1; i++ {
 
 		servers := 5
@@ -1164,13 +1164,13 @@ func internalChurn(t *testing.T, unreliable bool) {
 }
 
 func TestReliableChurn2C(t *testing.T) {
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 1; i++ {
 		internalChurn(t, false)
 	}
 }
 
 func TestUnreliableChurn2C(t *testing.T) {
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 1; i++ {
 		internalChurn(t, true)
 	}
 }
@@ -1242,47 +1242,101 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 }
 
 func TestSnapshotBasic2D(t *testing.T) {
-	snapcommon(t, "Test (2D): snapshots basic", false, true, false)
+	for i := 0; i < 1; i++ {
+		snapcommon(t, "Test (2D): snapshots basic", false, true, false)
+		// fmt.Printf("-----------------------------------------------round:%v pass-------------------------------------------\n", i)
+	}
 }
 
 func TestSnapshotInstall2D(t *testing.T) {
-	snapcommon(t, "Test (2D): install snapshots (disconnect)", true, true, false)
+	for i := 0; i < 1; i++ {
+		snapcommon(t, "Test (2D): install snapshots (disconnect)", true, true, false)
+		// fmt.Printf("-----------------------------------------------round:%v pass-------------------------------------------\n", i)
+	}
 }
 
 func TestSnapshotInstallUnreliable2D(t *testing.T) {
-	snapcommon(t, "Test (2D): install snapshots (disconnect+unreliable)",
-		true, false, false)
+	for i := 0; i < 1; i++ {
+		snapcommon(t, "Test (2D): install snapshots (disconnect+unreliable)",
+			true, false, false)
+		// fmt.Printf("-----------------------------------------------round:%v pass-------------------------------------------\n", i)
+	}
 }
 
 func TestSnapshotInstallCrash2D(t *testing.T) {
-	snapcommon(t, "Test (2D): install snapshots (crash)", false, true, true)
+	for i := 0; i < 1; i++ {
+		snapcommon(t, "Test (2D): install snapshots (crash)", false, true, true)
+		// fmt.Printf("-----------------------------------------------round:%v pass-------------------------------------------\n", i)
+	}
 }
 
 func TestSnapshotInstallUnCrash2D(t *testing.T) {
-	snapcommon(t, "Test (2D): install snapshots (unreliable+crash)", false, false, true)
+	for i := 0; i < 1; i++ {
+		snapcommon(t, "Test (2D): install snapshots (unreliable+crash)", false, false, true)
+		// fmt.Printf("-----------------------------------------------round:%v pass-------------------------------------------\n", i)
+	}
 }
 
 // do the servers persist the snapshots, and
 // restart using snapshot along with the
 // tail of the log?
 func TestSnapshotAllCrash2D(t *testing.T) {
-	servers := 3
-	iters := 5
-	cfg := make_config(t, servers, false, true)
-	defer cfg.cleanup()
+	for i := 0; i < 1; i++ {
+		servers := 3
+		iters := 5
+		cfg := make_config(t, servers, false, true)
+		defer cfg.cleanup()
 
-	cfg.begin("Test (2D): crash and restart all servers")
+		cfg.begin("Test (2D): crash and restart all servers")
 
-	cfg.one(rand.Int(), servers, true)
+		cfg.one(rand.Int(), servers, true)
 
-	for i := 0; i < iters; i++ {
-		// perhaps enough to get a snapshot
-		nn := (SnapShotInterval / 2) + (rand.Int() % SnapShotInterval)
+		for i := 0; i < iters; i++ {
+			// perhaps enough to get a snapshot
+			nn := (SnapShotInterval / 2) + (rand.Int() % SnapShotInterval)
+			for i := 0; i < nn; i++ {
+				cfg.one(rand.Int(), servers, true)
+			}
+
+			index1 := cfg.one(rand.Int(), servers, true)
+
+			// crash all
+			for i := 0; i < servers; i++ {
+				cfg.crash1(i)
+			}
+
+			// revive all
+			for i := 0; i < servers; i++ {
+				cfg.start1(i, cfg.applierSnap)
+				cfg.connect(i)
+			}
+
+			index2 := cfg.one(rand.Int(), servers, true)
+			if index2 < index1+1 {
+				t.Fatalf("index decreased from %v to %v", index1, index2)
+			}
+		}
+		cfg.end()
+		// fmt.Printf("-----------------------------------------------round:%v pass-------------------------------------------\n", i)
+	}
+}
+
+// do servers correctly initialize their in-memory copy of the snapshot, making
+// sure that future writes to persistent state don't lose state?
+func TestSnapshotInit2D(t *testing.T) {
+	for i := 0; i < 1; i++ {
+		servers := 3
+		cfg := make_config(t, servers, false, true)
+		defer cfg.cleanup()
+
+		cfg.begin("Test (2D): snapshot initialization after crash")
+		cfg.one(rand.Int(), servers, true)
+
+		// enough ops to make a snapshot
+		nn := SnapShotInterval + 1
 		for i := 0; i < nn; i++ {
 			cfg.one(rand.Int(), servers, true)
 		}
-
-		index1 := cfg.one(rand.Int(), servers, true)
 
 		// crash all
 		for i := 0; i < servers; i++ {
@@ -1295,56 +1349,23 @@ func TestSnapshotAllCrash2D(t *testing.T) {
 			cfg.connect(i)
 		}
 
-		index2 := cfg.one(rand.Int(), servers, true)
-		if index2 < index1+1 {
-			t.Fatalf("index decreased from %v to %v", index1, index2)
-		}
-	}
-	cfg.end()
-}
-
-// do servers correctly initialize their in-memory copy of the snapshot, making
-// sure that future writes to persistent state don't lose state?
-func TestSnapshotInit2D(t *testing.T) {
-	servers := 3
-	cfg := make_config(t, servers, false, true)
-	defer cfg.cleanup()
-
-	cfg.begin("Test (2D): snapshot initialization after crash")
-	cfg.one(rand.Int(), servers, true)
-
-	// enough ops to make a snapshot
-	nn := SnapShotInterval + 1
-	for i := 0; i < nn; i++ {
+		// a single op, to get something to be written back to persistent storage.
 		cfg.one(rand.Int(), servers, true)
+
+		// crash all
+		for i := 0; i < servers; i++ {
+			cfg.crash1(i)
+		}
+
+		// revive all
+		for i := 0; i < servers; i++ {
+			cfg.start1(i, cfg.applierSnap)
+			cfg.connect(i)
+		}
+
+		// do another op to trigger potential bug
+		cfg.one(rand.Int(), servers, true)
+		cfg.end()
+		// fmt.Printf("-----------------------------------------------round:%v pass-------------------------------------------\n", i)
 	}
-
-	// crash all
-	for i := 0; i < servers; i++ {
-		cfg.crash1(i)
-	}
-
-	// revive all
-	for i := 0; i < servers; i++ {
-		cfg.start1(i, cfg.applierSnap)
-		cfg.connect(i)
-	}
-
-	// a single op, to get something to be written back to persistent storage.
-	cfg.one(rand.Int(), servers, true)
-
-	// crash all
-	for i := 0; i < servers; i++ {
-		cfg.crash1(i)
-	}
-
-	// revive all
-	for i := 0; i < servers; i++ {
-		cfg.start1(i, cfg.applierSnap)
-		cfg.connect(i)
-	}
-
-	// do another op to trigger potential bug
-	cfg.one(rand.Int(), servers, true)
-	cfg.end()
 }

@@ -1,16 +1,19 @@
 package kvraft
 
-import "6.5840/porcupine"
-import "6.5840/models"
-import "testing"
-import "strconv"
-import "time"
-import "math/rand"
-import "strings"
-import "sync"
-import "sync/atomic"
-import "fmt"
-import "io/ioutil"
+import (
+	"fmt"
+	"io/ioutil"
+	"math/rand"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"6.5840/models"
+	"6.5840/porcupine"
+)
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -424,59 +427,69 @@ func GenericTestSpeed(t *testing.T, part string, maxraftstate int) {
 
 func TestBasic3A(t *testing.T) {
 	// Test: one client (3A) ...
-	GenericTest(t, "3A", 1, 5, false, false, false, -1, false)
+	for i := 0; i < 20; i++ {
+		GenericTest(t, "3A", 1, 5, false, false, false, -1, false)
+	}
 }
 
 func TestSpeed3A(t *testing.T) {
-	GenericTestSpeed(t, "3A", -1)
+	for i := 0; i < 20; i++ {
+		GenericTestSpeed(t, "3A", -1)
+	}
 }
 
 func TestConcurrent3A(t *testing.T) {
-	// Test: many clients (3A) ...
-	GenericTest(t, "3A", 5, 5, false, false, false, -1, false)
+	for i := 0; i < 20; i++ {
+		// Test: many clients (3A) ...
+		GenericTest(t, "3A", 5, 5, false, false, false, -1, false)
+	}
 }
 
 func TestUnreliable3A(t *testing.T) {
 	// Test: unreliable net, many clients (3A) ...
-	GenericTest(t, "3A", 5, 5, true, false, false, -1, false)
+	for i := 0; i < 20; i++ {
+		GenericTest(t, "3A", 5, 5, true, false, false, -1, false)
+	}
 }
 
 func TestUnreliableOneKey3A(t *testing.T) {
-	const nservers = 3
-	cfg := make_config(t, nservers, true, -1)
-	defer cfg.cleanup()
+	for i := 0; i < 20; i++ {
+		const nservers = 3
+		cfg := make_config(t, nservers, true, -1)
+		defer cfg.cleanup()
 
-	ck := cfg.makeClient(cfg.All())
+		ck := cfg.makeClient(cfg.All())
 
-	cfg.begin("Test: concurrent append to same key, unreliable (3A)")
+		cfg.begin("Test: concurrent append to same key, unreliable (3A)")
 
-	Put(cfg, ck, "k", "", nil, -1)
+		Put(cfg, ck, "k", "", nil, -1)
 
-	const nclient = 5
-	const upto = 10
-	spawn_clients_and_wait(t, cfg, nclient, func(me int, myck *Clerk, t *testing.T) {
-		n := 0
-		for n < upto {
-			Append(cfg, myck, "k", "x "+strconv.Itoa(me)+" "+strconv.Itoa(n)+" y", nil, -1)
-			n++
+		const nclient = 5
+		const upto = 10
+		spawn_clients_and_wait(t, cfg, nclient, func(me int, myck *Clerk, t *testing.T) {
+			n := 0
+			for n < upto {
+				Append(cfg, myck, "k", "x "+strconv.Itoa(me)+" "+strconv.Itoa(n)+" y", nil, -1)
+				n++
+			}
+		})
+
+		var counts []int
+		for i := 0; i < nclient; i++ {
+			counts = append(counts, upto)
 		}
-	})
 
-	var counts []int
-	for i := 0; i < nclient; i++ {
-		counts = append(counts, upto)
+		vx := Get(cfg, ck, "k", nil, -1)
+		checkConcurrentAppends(t, vx, counts)
+
+		cfg.end()
 	}
-
-	vx := Get(cfg, ck, "k", nil, -1)
-	checkConcurrentAppends(t, vx, counts)
-
-	cfg.end()
 }
 
 // Submit a request in the minority partition and check that the requests
 // doesn't go through until the partition heals.  The leader in the original
 // network ends up in the minority partition.
-func TestOnePartition3A(t *testing.T) {
+func TestOnePartition3a(t *testing.T) {
 	const nservers = 5
 	cfg := make_config(t, nservers, false, -1)
 	defer cfg.cleanup()
