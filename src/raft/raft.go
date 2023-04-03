@@ -387,6 +387,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if rf.GetLogTailIndex() >= args.PrevLogIndex {
 		preLogIdx = args.PrevLogIndex
+		// fmt.Printf("index:%v headindex:%v\n", preLogIdx, rf.GetLogHeadIndex())
+		if rf.ToSeqInedx(preLogIdx) < 0 {
+			reply.Success = false
+			reply.ConflictTerm = 0
+			reply.FirstIndex = rf.commitIndex + 1
+			return
+		}
 		preLogTerm = rf.log[rf.ToSeqInedx(preLogIdx)].Term
 	}
 
@@ -434,6 +441,45 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	//fmt.Printf("%v的log变为:%v\n", rf.me, rf.log)
 }
+
+// func (rf *Raft) Detect_Few_Partition() bool {
+// 	replies := 1
+
+// 	var wg sync.WaitGroup
+// 	var mu sync.Mutex
+// 	for i := 0; i < len(rf.peers); i++ {
+// 		if i == rf.me {
+// 			continue
+// 		} else {
+// 			wg.Add(1)
+// 			go func(u int) {
+// 				defer wg.Done()
+
+// 				args := AppendEntriesArgs{}
+// 				rf.FillAppendEntriesArgs(u, &args)
+
+// 				reply := AppendEntriesReply{}
+// 				ok := rf.sendAppendEntries(u, &args, &reply)
+
+// 				// timer := time.NewTimer(200 * time.Millisecond)
+
+// 				// fmt.Printf("leader %v receive reply from %v,is_ok:%v\n", rf.me, u, ok)
+
+// 				if ok {
+// 					mu.Lock()
+// 					replies += 1
+// 					mu.Unlock()
+// 				}
+
+// 			}(i)
+// 		}
+// 	}
+
+// 	wg.Wait()
+// 	// fmt.Printf("leader %v receive %v replies , tot:%v\n", rf.me, replies, len(rf.peers))
+
+// 	return replies <= len(rf.peers)/2
+// }
 
 // example code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
@@ -581,7 +627,9 @@ type InstallSnapshotArgs struct {
 }
 
 type InstallSnapshotReply struct {
-	Term int
+	NextIndex int
+	Term      int
+	Success   bool
 }
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
@@ -595,13 +643,16 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if args.LastIncludedIndex <= rf.lastIncludedIndex {
+	if args.Term < rf.currentTerm {
+		reply.Success = false
+		//fmt.Printf("leader %v 的term %v 比自己 %v 的 term %v 小，拒绝install\n", args.LeaderId, args.Term, rf.me, rf.currentTerm)
+		reply.Term = rf.currentTerm
 		return
 	}
 
-	if args.Term < rf.currentTerm {
-		//fmt.Printf("leader %v 的term %v 比自己 %v 的 term %v 小，拒绝install\n", args.LeaderId, args.Term, rf.me, rf.currentTerm)
-		reply.Term = rf.currentTerm
+	if args.LastIncludedIndex <= rf.lastIncludedIndex {
+		reply.Success = false
+		reply.NextIndex = rf.commitIndex + 1
 		return
 	}
 
@@ -610,6 +661,8 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.IsLeader = false
 
 	}
+
+	reply.Success = true
 
 	if rf.votedFor != args.LeaderId {
 		rf.votedFor = args.LeaderId
@@ -716,7 +769,24 @@ func (rf *Raft) SingleReplcate() {
 					ok := rf.sendInstallSnapshot(u, &ins_args, &reply)
 
 					if ok {
-						rf.nextIndex[u] = rf.lastIncludedIndex + 1
+						if reply.Success {
+							rf.nextIndex[u] = rf.lastIncludedIndex + 1
+						} else {
+							if reply.Term > rf.currentTerm {
+								rf.mu.Lock()
+								rf.currentTerm = reply.Term
+								rf.votedFor = -1
+								if rf.IsLeader {
+									rf.IsLeader = false
+								}
+								rf.persist()
+
+								rf.mu.Unlock()
+								rf.resetTimer <- struct{}{}
+							} else {
+								rf.nextIndex[u] = reply.NextIndex
+							}
+						}
 					}
 
 					return
@@ -807,7 +877,7 @@ func (rf *Raft) LogReplication() {
 			break
 		}
 		rf.resetTimer <- struct{}{}
-		time.Sleep(110 * time.Millisecond)
+		time.Sleep(30 * time.Millisecond)
 	}
 }
 
@@ -906,6 +976,8 @@ func (rf *Raft) Election() {
 					rf.IsLeader = true
 					has_been_leader = true
 					rf.mu.Unlock()
+
+					rf.Start(nil)
 
 					rf.resetOnElection()
 					go rf.LogReplication()
@@ -1023,6 +1095,21 @@ func (rf *Raft) GetLogHeadIndex() int {
 
 func (rf *Raft) ToSeqInedx(index int) int {
 	return index - rf.GetLogHeadIndex()
+}
+
+func (rf *Raft) GetLeaderId() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	var leader_id int
+
+	if rf.IsLeader {
+		leader_id = rf.me
+	} else {
+		leader_id = rf.votedFor
+	}
+
+	return leader_id
 }
 
 // the service or tester wants to create a Raft server. the ports

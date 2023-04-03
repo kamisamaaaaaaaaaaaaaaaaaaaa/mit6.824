@@ -1255,8 +1255,8 @@ func TestSnapshotInstall2D(t *testing.T) {
 	}
 }
 
-func TestSnapshotInstallUnreliable2D(t *testing.T) {
-	for i := 0; i < 1; i++ {
+func TestSnapshotInstallUnreliable2d(t *testing.T) {
+	for i := 0; i < 20; i++ {
 		snapcommon(t, "Test (2D): install snapshots (disconnect+unreliable)",
 			true, false, false)
 		// fmt.Printf("-----------------------------------------------round:%v pass-------------------------------------------\n", i)
