@@ -1,9 +1,11 @@
 package kvraft
 
 import (
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"6.5840/labgob"
 	"6.5840/labrpc"
@@ -26,7 +28,7 @@ type Op struct {
 	Operation string
 	Key       string
 	Value     string
-	Client_id int
+	Client_id int64
 	Op_id     int
 }
 
@@ -39,13 +41,11 @@ type KVServer struct {
 
 	maxraftstate int // snapshot if log grows this big
 
-	hash                      map[string]string
-	lastappliedindex          int
-	lastindex                 int
-	up_to_date                *sync.Cond
-	has_put                   *sync.Cond
-	client_id_to_last_op_id   map[int]int
-	client_id_to_recent_op_id map[int]int
+	Data                 map[string]string
+	appliedindex         int
+	indexfinished        map[int]chan Op
+	ClientId_to_LastOpId map[int64]int
+	persister            *raft.Persister
 	// Your definitions here.
 }
 
@@ -60,40 +60,50 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	kv.mu.Lock()
 
-	if _, isleader := kv.rf.GetState(); !isleader {
+	op := Op{
+		Operation: "Get",
+		Key:       args.Key,
+		Value:     "",
+		Client_id: args.Client_id,
+		Op_id:     args.Op_id,
+	}
+
+	index, _, isleader := kv.rf.Start(op)
+
+	if !isleader {
 		reply.Err = "Not Leader"
-		// fmt.Printf("server %v is not leader\n", kv.me)
+		reply.LeaderId = kv.rf.GetLeaderId()
 		kv.mu.Unlock()
 		return
 	}
 
-	// fmt.Printf("server %v 收到Get请求，is leader\n", kv.me)
-
-	for kv.lastappliedindex < kv.lastindex {
-		kv.up_to_date.Wait()
-	}
-
-	value, ok := kv.hash[args.Key]
-	if !ok {
-		value = ""
-	}
-
-	reply.Value = value
+	kv.indexfinished[index] = make(chan Op, 1)
+	ch := kv.indexfinished[index]
 
 	kv.mu.Unlock()
+
+	defer func() {
+		kv.mu.Lock()
+		delete(kv.indexfinished, index)
+		kv.mu.Unlock()
+	}()
+
+	select {
+	case command := <-ch:
+		if command.Client_id == op.Client_id && command.Op_id == op.Op_id {
+			////fmt.Printf("Get成功，Key:%v，Value:%v\n", op.Key, kv.Data[op.Key])
+			reply.Value = kv.Data[op.Key]
+		} else {
+			reply.Err = "Get Failed"
+		}
+	case <-time.After(1 * time.Second):
+		reply.Err = "Get Timeout"
+	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-
 	kv.mu.Lock()
-	defer kv.mu.Unlock()
-
-	if _, isleader := kv.rf.GetState(); !isleader {
-		reply.Err = "Not Leader"
-		return
-	}
-
 	op := Op{
 		Operation: args.Op,
 		Key:       args.Key,
@@ -106,56 +116,126 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	if !isleader {
 		reply.Err = "Not Leader"
+		reply.LeaderId = kv.rf.GetLeaderId()
+		kv.mu.Unlock()
 		return
 	}
 
-	_, ok := kv.client_id_to_last_op_id[op.Client_id]
-	if !ok {
-		kv.client_id_to_last_op_id[op.Client_id] = -1
+	kv.indexfinished[index] = make(chan Op, 1)
+	ch := kv.indexfinished[index]
+
+	kv.mu.Unlock()
+
+	defer func() {
+		kv.mu.Lock()
+		delete(kv.indexfinished, index)
+		kv.mu.Unlock()
+	}()
+
+	select {
+	case command := <-ch:
+		if command.Client_id == op.Client_id && command.Op_id == op.Op_id {
+			return
+		} else {
+			reply.Err = "Put/Append Failed"
+		}
+	case <-time.After(1 * time.Second):
+		reply.Err = "Put/Append Timeout"
 	}
-
-	//fmt.Printf("server %v 收到 %v 命令,Key: %v,Value: %v\n", kv.me, op.Operation, op.Key, op.Value)
-	kv.lastindex = index
-
-	for kv.client_id_to_last_op_id[op.Client_id] < op.Op_id {
-		kv.has_put.Wait()
-	}
-
 }
 
 func (kv *KVServer) applier() {
 	for {
 		select {
-		case op := <-kv.applyCh:
-			kv.mu.Lock()
+		case command := <-kv.applyCh:
+			//fmt.Printf("server :%v commandindex:%v command:%v\n", kv.me, command.CommandIndex, command)
+			if command.SnapshotValid {
+				kv.ReadSnapshot()
+			} else {
 
-			command := op.Command.(Op)
+				if command.Command != nil {
 
-			if command.Op_id > kv.client_id_to_last_op_id[command.Client_id] {
-				if command.Operation == "Put" {
-					//fmt.Printf("server:%v lastappliedindex:%v CommandIndex:%v Put Key:%v Value:%v\n", kv.me, kv.lastappliedindex, op.CommandIndex, command.Key, command.Value)
-					kv.hash[command.Key] = command.Value
-				} else {
-					//fmt.Printf("server:%v lastappliedindex:%v CommandIndex:%v Append Key:%v Value:%v\n", kv.me, kv.lastappliedindex, op.CommandIndex, command.Key, command.Value)
-					value, ok := kv.hash[command.Key]
+					op := command.Command.(Op)
+					kv.mu.Lock()
+
+					last_op_id, ok := kv.ClientId_to_LastOpId[op.Client_id]
 					if !ok {
-						kv.hash[command.Key] = command.Value
-					} else {
-						kv.hash[command.Key] = value + command.Value
+						last_op_id = -1
 					}
+
+					if last_op_id < op.Op_id {
+						//fmt.Printf("server :%v commandindex:%v last op id : %v , op_id : %v ,oper : %v, Key: %v, Value : %v\n", kv.me, command.CommandIndex, last_op_id, op.Op_id, op.Operation, op.Key, op.Value)
+						if op.Operation == "Put" {
+							kv.Data[op.Key] = op.Value
+						} else if op.Operation == "Append" {
+							kv.Data[op.Key] += op.Value
+						}
+						kv.ClientId_to_LastOpId[op.Client_id] = op.Op_id
+					}
+
+					if ch, ok := kv.indexfinished[command.CommandIndex]; ok {
+						_, isleader := kv.rf.GetState()
+						if isleader {
+							ch <- op
+						} else {
+							ch <- Op{
+								Operation: "",
+								Key:       "",
+								Value:     "",
+								Client_id: -1,
+								Op_id:     -1,
+							}
+						}
+						delete(kv.indexfinished, command.CommandIndex)
+					}
+
+					kv.mu.Unlock()
+				}
+
+				if kv.maxraftstate != -1 && kv.persister.RaftStateSize() >= kv.maxraftstate {
+					kv.Snapshot(command.CommandIndex)
 				}
 			}
-
-			kv.lastappliedindex = op.CommandIndex
-			kv.lastindex = max(kv.lastindex, op.CommandIndex)
-			kv.client_id_to_last_op_id[command.Client_id] = max(kv.client_id_to_last_op_id[command.Client_id], command.Op_id)
-
-			kv.up_to_date.Broadcast()
-			kv.has_put.Broadcast()
-
-			kv.mu.Unlock()
 		}
+	}
+}
 
+func (kv *KVServer) Snapshot(index int) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	////fmt.Printf("server %v data before snapshot: %v \n", kv.me, kv.Data)
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+
+	e.Encode(kv.Data)
+	e.Encode(kv.ClientId_to_LastOpId)
+
+	sm_state := w.Bytes()
+
+	kv.rf.Snapshot(index, sm_state)
+}
+
+func (kv *KVServer) ReadSnapshot() {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	data := kv.persister.ReadSnapshot()
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+
+	var Data map[string]string
+	var ClientId_to_LastOpId map[int64]int
+
+	if d.Decode(&Data) != nil || d.Decode(&ClientId_to_LastOpId) != nil {
+		// //fmt.Printf("--------------------------decode failed------------------------\n")
+	} else {
+		kv.Data = Data
+		kv.ClientId_to_LastOpId = ClientId_to_LastOpId
+
+		//fmt.Printf("server %v data after Readsnapshot: %v \n", kv.me, kv.Data)
 	}
 }
 
@@ -205,14 +285,17 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
-	kv.hash = make(map[string]string)
-	kv.lastappliedindex = 0
-	kv.lastindex = 0
-	kv.up_to_date = sync.NewCond(&kv.mu)
-	kv.has_put = sync.NewCond(&kv.mu)
+	kv.Data = make(map[string]string)
 
-	kv.client_id_to_last_op_id = make(map[int]int)
-	kv.client_id_to_recent_op_id = make(map[int]int)
+	kv.ClientId_to_LastOpId = make(map[int64]int)
+
+	kv.persister = persister
+
+	kv.indexfinished = make(map[int]chan Op)
+
+	kv.appliedindex = 0
+
+	kv.ReadSnapshot()
 
 	go kv.applier()
 
