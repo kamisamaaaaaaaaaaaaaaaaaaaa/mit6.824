@@ -92,7 +92,9 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	case command := <-ch:
 		if command.Client_id == op.Client_id && command.Op_id == op.Op_id {
 			////fmt.Printf("Get成功，Key:%v，Value:%v\n", op.Key, kv.Data[op.Key])
+			kv.mu.Lock()
 			reply.Value = kv.Data[op.Key]
+			kv.mu.Unlock()
 		} else {
 			reply.Err = "Get Failed"
 		}

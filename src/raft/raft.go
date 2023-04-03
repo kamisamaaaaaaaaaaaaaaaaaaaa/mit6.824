@@ -58,11 +58,6 @@ type LogEntry struct {
 	Index   int
 }
 
-type Snapshot struct {
-	Index int
-	Entry LogEntry
-}
-
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
@@ -97,7 +92,6 @@ type Raft struct {
 
 	lastIncludedIndex int
 	lastIncludedTerm  int
-	snapshot          []byte
 }
 
 func max(a, b int) int {
@@ -162,11 +156,7 @@ func (rf *Raft) persist() {
 
 	raftstate := w.Bytes()
 
-	if rf.lastIncludedIndex == 0 {
-		rf.persister.Save(raftstate, nil)
-	} else {
-		rf.persister.Save(raftstate, rf.snapshot)
-	}
+	rf.persister.SaveRaftState(raftstate)
 }
 
 // restore previously persisted state.
@@ -223,7 +213,6 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.log = Log
 		rf.lastIncludedIndex = LastIncludedIndex
 		rf.lastIncludedTerm = LastIncludedTerm
-		rf.snapshot = rf.persister.ReadSnapshot()
 		rf.log[0].Index = rf.lastIncludedIndex
 		rf.log[0].Term = rf.lastIncludedTerm
 		rf.commitIndex = LastIncludedIndex
@@ -253,12 +242,12 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	//fmt.Printf("生成快照前的log为:%v\n", rf.log)
 	rf.lastIncludedIndex = index
 	rf.lastIncludedTerm = rf.log[rf.ToSeqInedx(index)].Term
-	rf.snapshot = snapshot
 	rf.log = rf.log[rf.ToSeqInedx(index):]
 	rf.log[0].Command = nil
 	rf.commitIndex = max(index, rf.commitIndex)
 	rf.lastApplied = max(index, rf.lastApplied)
 	rf.persist()
+	rf.persister.SaveSnapshot(snapshot)
 	//fmt.Printf("生成快照后的log为:%v\n", rf.log)
 
 	//fmt.Printf("生成快照后的内容为:SnapshotIndex: %v SnapshotTerm:%v \n", rf.lastIncludedIndex, rf.lastIncludedTerm)
@@ -675,7 +664,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	rf.resetTimer <- struct{}{}
 
-	rf.snapshot = args.Data
+	// rf.snapshot = args.Data
 	rf.lastIncludedIndex = args.LastIncludedIndex
 	rf.lastIncludedTerm = args.LastIncludedTerm
 
@@ -702,6 +691,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.log[0].Command = nil
 
 	rf.persist()
+	rf.persister.SaveSnapshot(args.Data)
 
 	//fmt.Printf("%v收到了leader %v的install后裁剪后的log为%v\n", rf.me, args.LeaderId, rf.log)
 
@@ -723,7 +713,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	applymsg.SnapshotValid = true
 	applymsg.SnapshotIndex = rf.lastIncludedIndex
 	applymsg.SnapshotTerm = rf.lastIncludedTerm
-	applymsg.Snapshot = rf.snapshot
+	applymsg.Snapshot = args.Data
 
 	// if rf.commitIndex>=
 
