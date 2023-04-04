@@ -431,44 +431,44 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//fmt.Printf("%v的log变为:%v\n", rf.me, rf.log)
 }
 
-// func (rf *Raft) Detect_Few_Partition() bool {
-// 	replies := 1
+func (rf *Raft) Detect_Few_Partition() bool {
+	replies := 1
 
-// 	var wg sync.WaitGroup
-// 	var mu sync.Mutex
-// 	for i := 0; i < len(rf.peers); i++ {
-// 		if i == rf.me {
-// 			continue
-// 		} else {
-// 			wg.Add(1)
-// 			go func(u int) {
-// 				defer wg.Done()
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	for i := 0; i < len(rf.peers); i++ {
+		if i == rf.me {
+			continue
+		} else {
+			wg.Add(1)
+			go func(u int) {
+				defer wg.Done()
 
-// 				args := AppendEntriesArgs{}
-// 				rf.FillAppendEntriesArgs(u, &args)
+				args := AppendEntriesArgs{}
+				rf.FillAppendEntriesArgs(u, &args)
 
-// 				reply := AppendEntriesReply{}
-// 				ok := rf.sendAppendEntries(u, &args, &reply)
+				reply := AppendEntriesReply{}
+				ok := rf.sendAppendEntries(u, &args, &reply)
 
-// 				// timer := time.NewTimer(200 * time.Millisecond)
+				// timer := time.NewTimer(200 * time.Millisecond)
 
-// 				// fmt.Printf("leader %v receive reply from %v,is_ok:%v\n", rf.me, u, ok)
+				// fmt.Printf("leader %v receive reply from %v,is_ok:%v\n", rf.me, u, ok)
 
-// 				if ok {
-// 					mu.Lock()
-// 					replies += 1
-// 					mu.Unlock()
-// 				}
+				if ok {
+					mu.Lock()
+					replies += 1
+					mu.Unlock()
+				}
 
-// 			}(i)
-// 		}
-// 	}
+			}(i)
+		}
+	}
 
-// 	wg.Wait()
-// 	// fmt.Printf("leader %v receive %v replies , tot:%v\n", rf.me, replies, len(rf.peers))
+	wg.Wait()
+	// fmt.Printf("leader %v receive %v replies , tot:%v\n", rf.me, replies, len(rf.peers))
 
-// 	return replies <= len(rf.peers)/2
-// }
+	return replies <= len(rf.peers)/2
+}
 
 // example code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
@@ -525,6 +525,30 @@ func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply
 // if it's ever committed. the second return value is the current
 // term. the third return value is true if this server believes it is
 // the leader.
+
+func (rf *Raft) TryStart() (int, int, bool) {
+	index := -1
+	term := 0
+	isLeader := false
+
+	// Your code here (2B).
+	select {
+	case <-rf.shutdown:
+		return index, term, isLeader
+	default:
+	}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if rf.IsLeader {
+		index = rf.GetLogTailIndex()
+		term = rf.currentTerm
+		isLeader = true
+	}
+
+	return index, term, isLeader
+}
 
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
