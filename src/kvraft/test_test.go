@@ -759,7 +759,7 @@ func TestSnapshotUnreliableRecoverConcurrentPartition3B(t *testing.T) {
 	}
 }
 
-func TestSnapshotUnreliableRecoverConcurrentPartitionLinearizable3B(t *testing.T) {
+func TestSnapshotUnreliableRecoverConcurrentPartitionLinearizable3b(t *testing.T) {
 	for i := 0; i < 1; i++ {
 		// Test: unreliable net, restarts, partitions, snapshots, random keys, many clients (3B) ...
 		GenericTest(t, "3B", 15, 7, true, true, true, 1000, true)
